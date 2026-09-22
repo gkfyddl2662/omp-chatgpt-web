@@ -1,12 +1,30 @@
 import assert from "node:assert/strict";
 import { assertAllowedInferenceBackend } from "./backend-policy.js";
 import { CapabilityBroker } from "./capability-broker.js";
+import { classifyBrowserRequest } from "./chatgpt-web/network-policy.js";
 import type { OmpToolRuntime, ToolExecutionResult } from "./types.js";
 
 assertAllowedInferenceBackend({ kind: "chatgpt-web", surface: "normal-chat" });
 assert.throws(
   () => assertAllowedInferenceBackend({ kind: "codex" }),
   /Forbidden inference backend/,
+);
+
+assert.deepEqual(
+  classifyBrowserRequest("https://chatgpt.com/backend-api/conversation"),
+  { allowed: true },
+);
+assert.equal(
+  classifyBrowserRequest("https://api.openai.com/v1/responses").allowed,
+  false,
+);
+assert.equal(
+  classifyBrowserRequest("https://chatgpt.com/codex", { navigation: true }).allowed,
+  false,
+);
+assert.equal(
+  classifyBrowserRequest("https://chatgpt.com/work", { navigation: true }).allowed,
+  false,
 );
 
 const runtime: OmpToolRuntime = {
