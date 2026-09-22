@@ -5,9 +5,10 @@ $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $logPath = Join-Path $env:TEMP ("omp-chatgpt-web-chatgpt-" + [DateTime]::Now.ToString("yyyyMMdd-HHmmss") + ".log")
 $transcriptStarted = $false
 $exitCode = 0
-$cdpPort = 9223
+$cdpPort = 9224
 $cdpUrl = "http://127.0.0.1:$cdpPort"
-$profileDir = Join-Path $HOME ".omp-chatgpt-web\browser-profile"
+$profileDir = Join-Path $HOME ".omp-chatgpt-web\cdp-browser-profile"
+$expectedReply = "OMP CHATGPT WEB READY"
 
 function Find-BrowserExecutable {
     $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
@@ -69,6 +70,26 @@ function Ensure-UserLaunchedBrowser {
     throw "Chrome/Edge CDP endpoint did not become ready at $cdpUrl"
 }
 
+function Invoke-NodeCapture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $lines = @(& node @Arguments 2>&1)
+    $code = $LASTEXITCODE
+
+    foreach ($line in $lines) {
+        Write-Host ([string]$line)
+    }
+
+    return @{
+        ExitCode = $code
+        Lines = $lines
+        Text = ($lines -join [Environment]::NewLine)
+    }
+}
+
 try {
     Start-Transcript -Path $logPath -Force | Out-Null
     $transcriptStarted = $true
@@ -84,26 +105,57 @@ try {
     Write-Host "=== Install / Verify ==="
     npm install --no-package-lock
     if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+
     npm run verify
     if ($LASTEXITCODE -ne 0) { throw "npm run verify failed with exit code $LASTEXITCODE" }
 
     Write-Host ""
     Write-Host "=== User-Launched Browser / CDP ==="
     Ensure-UserLaunchedBrowser
-    $env:OMP_CHATGPT_WEB_CDP_URL = $cdpUrl
     Write-Host "CDP ready: $cdpUrl"
 
     Write-Host ""
-    Write-Host "=== ChatGPT Web Login ==="
-    Write-Host "Use the opened normal Chrome/Edge window."
-    Write-Host "If ChatGPT asks you to sign in, complete the login there."
-    npm run chatgpt:login
-    if ($LASTEXITCODE -ne 0) { throw "ChatGPT login probe failed with exit code $LASTEXITCODE" }
+    Write-Host "=== Manual ChatGPT Login ==="
+    Write-Host "IMPORTANT: Playwright is NOT attached yet."
+    Write-Host "Use the opened normal Chrome/Edge window and finish ChatGPT login manually."
+    Write-Host "If you use Google OAuth, complete it entirely in that browser."
+    Write-Host "Wait until the normal ChatGPT message composer is visible."
+    [void](Read-Host "When the ChatGPT composer is visible, press Enter here")
+
+    $env:OMP_CHATGPT_WEB_CDP_URL = $cdpUrl
+    $env:OMP_CHATGPT_WEB_PROFILE_DIR = $profileDir
+
+    Write-Host ""
+    Write-Host "=== ChatGPT Authentication Check ==="
+    $auth = Invoke-NodeCapture -Arguments @("dist/cli.js", "browser-check")
+    if ($auth.ExitCode -ne 0) {
+        throw "ChatGPT authentication check failed with exit code $($auth.ExitCode)"
+    }
+    if ($auth.Text -notmatch '"authenticated"\s*:\s*true') {
+        throw "ChatGPT authentication check did not report authenticated=true"
+    }
 
     Write-Host ""
     Write-Host "=== ChatGPT Web Normal-Chat Probe ==="
-    npm run chatgpt:chat -- "Reply with exactly: OMP CHATGPT WEB READY"
-    if ($LASTEXITCODE -ne 0) { throw "ChatGPT chat probe failed with exit code $LASTEXITCODE" }
+    $chat = Invoke-NodeCapture -Arguments @(
+        "dist/cli.js",
+        "chat",
+        "Reply with exactly: $expectedReply"
+    )
+    if ($chat.ExitCode -ne 0) {
+        throw "ChatGPT chat probe failed with exit code $($chat.ExitCode)"
+    }
+
+    $matchedReply = $false
+    foreach ($line in $chat.Lines) {
+        if (([string]$line).Trim() -eq $expectedReply) {
+            $matchedReply = $true
+            break
+        }
+    }
+    if (-not $matchedReply) {
+        throw "ChatGPT response did not contain the exact expected line: $expectedReply"
+    }
 
     Write-Host ""
     Write-Host "=== Git State ==="
