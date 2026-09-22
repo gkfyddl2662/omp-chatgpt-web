@@ -21,8 +21,14 @@ export function startSecureMcpTunnel(
     env: {
       ...process.env,
       OPENAI_MCP_TUNNEL_ID: config.tunnelId,
-      OPENAI_MCP_RUNTIME_KEY: config.runtimeKey,
+      ...(config.runtimeKey
+        ? { OPENAI_MCP_RUNTIME_KEY: config.runtimeKey }
+        : {}),
     },
+  });
+
+  child.on("error", (error) => {
+    console.error(`Secure MCP Tunnel failed to start: ${error.message}`);
   });
 
   return {
