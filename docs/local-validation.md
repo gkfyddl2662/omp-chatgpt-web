@@ -1,56 +1,64 @@
 # Windows local validation
 
-Current bootstrap validation checks the TypeScript project, fail-closed backend
-policy, and capability-broker lifecycle. ChatGPT Web/browser/MCP integration is
-not implemented yet.
+Validation scripts are designed for Windows PowerShell 5.1 and PowerShell 7+.
+They capture the complete transcript and copy it to the clipboard at the end,
+including failure output.
 
 ## Prerequisites
 
-- Windows PowerShell 5.1 or PowerShell 7+
 - Git
 - Node.js 22+ with npm
+- Google Chrome or Microsoft Edge for the ChatGPT Web probe
 
-## One-shot validation
+## Bootstrap verification
 
-Run PowerShell as your normal user:
+From the repository root:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-$ErrorActionPreference = "Stop"
-
-$repo = Join-Path $HOME "omp-chatgpt-web"
-if (Test-Path $repo) {
-  Set-Location $repo
-  git fetch origin
-} else {
-  git clone https://github.com/gkfyddl2662/omp-chatgpt-web.git $repo
-  Set-Location $repo
-}
-
-git checkout feat/bootstrap-native-mcp
-git pull --ff-only origin feat/bootstrap-native-mcp
-
-Write-Host "=== Versions ==="
-git --version
-node --version
-npm --version
-
-Write-Host "=== Install ==="
-npm install
-
-Write-Host "=== Verify ==="
-npm run verify
-
-Write-Host "=== Git state ==="
-git status --short
-git rev-parse --short HEAD
+& .\scripts\windows\verify.ps1
 ```
 
-Expected success marker:
+Expected marker:
 
 ```text
 bootstrap smoke verification: PASS
+=== RESULT: PASS ===
+Full validation output copied to clipboard.
 ```
 
-If validation fails, copy the complete PowerShell output from `=== Versions ===`
-through the error and return it for diagnosis.
+## Phase 1 ChatGPT Web probe
+
+This opens a project-owned persistent Chrome/Edge profile under
+`~/.omp-chatgpt-web/browser-profile`.
+
+If ChatGPT asks for authentication, complete the login in that managed browser
+window. The probe then creates a normal Temporary Chat and sends a deterministic
+test prompt.
+
+Run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+& .\scripts\windows\test-chatgpt.ps1
+```
+
+Expected assistant text:
+
+```text
+OMP CHATGPT WEB READY
+```
+
+The script then copies its complete transcript to the clipboard. Paste that
+transcript into the development chat for the next iteration.
+
+## Current scope
+
+The Phase 1 browser probe verifies only:
+
+```text
+local runtime -> normal ChatGPT Web Temporary Chat -> assistant text
+```
+
+It does not yet integrate the browser runtime into OMP's provider registry and
+does not yet start the Secure MCP Tunnel. Those are subsequent milestones.
