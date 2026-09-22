@@ -12,5 +12,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
-      - run: npm run verify
+      - name: Install
+        shell: bash
+        run: |
+          set -o pipefail
+          npm install 2>&1 | tee install.log
+      - name: Verify
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run verify 2>&1 | tee verify.log
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diagnostics
+          path: |
+            install.log
+            verify.log
+          if-no-files-found: ignore
