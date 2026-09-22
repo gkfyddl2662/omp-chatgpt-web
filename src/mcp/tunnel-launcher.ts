@@ -8,15 +8,22 @@ export interface TunnelProcess {
 }
 
 /**
- * Starts the external Secure MCP Tunnel transport process.
+ * Starts the Secure MCP Tunnel transport process.
  *
- * The tunnel only transports MCP stdio. Authorization remains local in the
- * capability broker.
+ * If no external tunnel executable is installed, the default development
+ * command resolves to the bundled stdio MCP server so the transport path can
+ * still be validated locally.
  */
 export function startSecureMcpTunnel(
   config: SecureMcpTunnelConfig = createTunnelConfigFromEnv(),
 ): TunnelProcess {
-  const child = spawn(config.command, config.args, {
+  const isLocalFallback = config.command === "omp-chatgpt-web-mcp";
+  const command = isLocalFallback ? process.execPath : config.command;
+  const args = isLocalFallback
+    ? ["dist/mcp/stdio-main.js"]
+    : config.args;
+
+  const child = spawn(command, args, {
     stdio: ["pipe", "pipe", "inherit"],
     env: {
       ...process.env,
