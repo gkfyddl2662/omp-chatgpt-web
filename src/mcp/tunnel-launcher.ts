@@ -4,6 +4,7 @@ import { createTunnelConfigFromEnv, type SecureMcpTunnelConfig } from "./tunnel-
 export interface TunnelProcess {
   process: ChildProcess;
   config: SecureMcpTunnelConfig;
+  stop(): Promise<void>;
 }
 
 /**
@@ -16,7 +17,7 @@ export function startSecureMcpTunnel(
   config: SecureMcpTunnelConfig = createTunnelConfigFromEnv(),
 ): TunnelProcess {
   const child = spawn(config.command, config.args, {
-    stdio: "inherit",
+    stdio: ["pipe", "pipe", "inherit"],
     env: {
       ...process.env,
       OPENAI_MCP_TUNNEL_ID: config.tunnelId,
@@ -27,5 +28,10 @@ export function startSecureMcpTunnel(
   return {
     process: child,
     config,
+    stop: async () => {
+      if (child.killed) return;
+      child.kill();
+      await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    },
   };
 }
