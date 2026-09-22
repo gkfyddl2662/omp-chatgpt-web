@@ -1,17 +1,15 @@
-import { ChatGptWebProvider } from "../provider/chatgpt-web-provider.js";
+import { ompChatgptWebManifest } from "./extension-manifest.js";
+import { createChatGptWebModelRegistration } from "./omp-model-registry.js";
 
 /**
  * OMP integration boundary.
  *
- * This intentionally keeps the provider registration isolated from the
- * ChatGPT Web runtime. The final adapter will map this object into OMP's
- * extension/provider API without introducing another inference path.
+ * This object is intentionally independent from the browser runtime. The
+ * final OMP extension adapter will translate this into the host API.
  */
 export function createOmpChatGptWebExtension() {
-  const provider = new ChatGptWebProvider();
-
   return {
-    id: "omp-chatgpt-web",
-    providers: [provider],
+    manifest: ompChatgptWebManifest,
+    models: [createChatGptWebModelRegistration()],
   };
 }
