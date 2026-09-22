@@ -1,0 +1,14 @@
+{
+  "name": "omp-chatgpt-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Oh My Pi harness backed by normal ChatGPT Web chat with native MCP tool calls.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
