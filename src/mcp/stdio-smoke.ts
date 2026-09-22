@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { CapabilityBroker } from "../capability-broker.js";
-import { OmpNativeMcpServer } from "./omp-native-mcp-server.js";
+import { createBootstrapRuntime } from "../omp/runtime-bootstrap.js";
 import { OmpMcpProtocolServer } from "./protocol-server.js";
 
-const broker = new CapabilityBroker();
-const server = new OmpNativeMcpServer({ broker });
-const protocol = new OmpMcpProtocolServer(server);
+const { mcp, contexts } = createBootstrapRuntime();
+const protocol = new OmpMcpProtocolServer(mcp);
+
+const capability = "stdio-smoke-capability";
+contexts.register({
+  token: capability,
+  sessionId: "stdio-session",
+  turnId: "stdio-turn",
+  cwd: process.cwd(),
+});
 
 const initialize = await protocol.handle({
   jsonrpc: "2.0",
@@ -16,12 +22,14 @@ const initialize = await protocol.handle({
 assert.equal(initialize.jsonrpc, "2.0");
 assert.equal((initialize.result as any).serverInfo.name, "omp-chatgpt-web");
 
-const missing = await protocol.handle({
+const tools = await protocol.handle({
   jsonrpc: "2.0",
   id: 2,
-  method: "unknown",
+  method: "tools/list",
+  params: { capability },
 });
 
-assert.equal(missing.error?.code, -32601);
+assert.equal(Array.isArray((tools.result as any).tools), true);
+assert.equal((tools.result as any).tools[0].name, "read");
 
 console.log("mcp protocol smoke verification: PASS");
