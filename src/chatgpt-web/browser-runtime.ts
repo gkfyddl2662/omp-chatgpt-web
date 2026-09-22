@@ -129,7 +129,7 @@ export class ChatGptBrowserRuntime {
 
   constructor(options: ChatGptBrowserRuntimeOptions = {}) {
     this.#options = {
-      profileDir: options.profileDir ?? defaultProfileDir(),
+      profileDir: options.profileDir ?? process.env.OMP_CHATGPT_WEB_PROFILE_DIR ?? defaultProfileDir(),
       executablePath: options.executablePath,
       cdpUrl: options.cdpUrl ?? process.env.OMP_CHATGPT_WEB_CDP_URL,
       navigationTimeoutMs: options.navigationTimeoutMs ?? 60_000,
