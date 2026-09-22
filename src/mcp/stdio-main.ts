@@ -1,18 +1,16 @@
 import readline from "node:readline";
-import { CapabilityBroker } from "../capability-broker.js";
-import { OmpNativeMcpServer } from "./omp-native-mcp-server.js";
+import { createBootstrapRuntime } from "../omp/runtime-bootstrap.js";
 import { OmpMcpProtocolServer } from "./protocol-server.js";
 
 /**
  * stdio entrypoint used by tunnel-client.
  *
- * Real OMP runtime binding will inject a session-bound CapabilityBroker.
- * This entrypoint currently provides the transport loop.
+ * Uses the same bootstrap runtime as local MCP smoke tests. The production
+ * integration will replace this runtime with the live OMP session runtime.
  */
 
-const broker = new CapabilityBroker();
-const server = new OmpNativeMcpServer({ broker });
-const protocol = new OmpMcpProtocolServer(server);
+const runtime = createBootstrapRuntime();
+const protocol = new OmpMcpProtocolServer(runtime.mcp);
 
 const rl = readline.createInterface({
   input: process.stdin,
