@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { CapabilityBroker } from "../capability-broker.js";
 import { OmpNativeMcpServer } from "./omp-native-mcp-server.js";
+import { McpToolCallRouter } from "./tool-call-router.js";
+import { CapabilityContextRegistry } from "./capability-context.js";
 import type { OmpToolRuntime } from "../types.js";
 
 const runtime: OmpToolRuntime = {
@@ -28,7 +30,16 @@ const token = broker.bind({
   createdAt: Date.now(),
 });
 
-const server = new OmpNativeMcpServer({ broker });
+const contexts = new CapabilityContextRegistry();
+contexts.register({
+  token,
+  sessionId: "mcp-test",
+  turnId: "mcp-test-turn",
+  cwd: process.cwd(),
+});
+
+const router = new McpToolCallRouter(contexts, broker);
+const server = new OmpNativeMcpServer({ broker, router });
 const tools = await server.listTools(token);
 assert.equal(tools[0]?.name, "read");
 
