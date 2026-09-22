@@ -20,6 +20,9 @@ contexts.register({
   cwd: process.cwd(),
 });
 
+const tools = await broker.listTools(capability);
+assert.equal(tools[0]?.name, "read");
+
 const result = await mcp.callTool(capability, {
   callId: "read-smoke",
   name: "read",
