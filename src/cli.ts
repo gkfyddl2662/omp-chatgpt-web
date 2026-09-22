@@ -16,10 +16,10 @@ const runtime = new ChatGptBrowserRuntime();
 try {
   if (command === "browser-check") {
     const authenticated = await runtime.checkAuthenticated();
-    console.log(JSON.stringify({ authenticated, profileDir: runtime.profileDir }));
+    console.log(JSON.stringify({ authenticated, profileDir: runtime.profileDir, connectionMode: runtime.connectionMode }));
     process.exitCode = authenticated ? 0 : 3;
   } else if (command === "browser-login") {
-    console.log("A managed Chrome/Edge window will open. Sign in to ChatGPT if needed.");
+    console.log(`Browser connection mode: ${runtime.connectionMode}`);
     console.log("Waiting for the normal ChatGPT composer...");
     await runtime.waitUntilAuthenticated();
     console.log("ChatGPT Web authentication: READY");
