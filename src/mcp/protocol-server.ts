@@ -14,60 +14,41 @@ export type JsonRpcResponse = {
   error?: { code: number; message: string };
 };
 
-/**
- * MCP JSON-RPC boundary. Capability is intentionally explicit because the
- * transport layer must never decide which OMP session receives a tool call.
- */
 export class OmpMcpProtocolServer {
   constructor(private readonly server: OmpNativeMcpServer) {}
 
   async handle(request: JsonRpcRequest): Promise<JsonRpcResponse> {
     try {
+      const id = request.id ?? null;
       const capability = String(request.params?.capability ?? "");
 
       switch (request.method) {
         case "initialize":
-          return this.ok(request.id, {
+          return this.ok(id, {
             protocolVersion: "2025-03-26",
             capabilities: { tools: {} },
             serverInfo: { name: "omp-chatgpt-web", version: "0.0.0" },
           });
-
         case "tools/list":
-          return this.ok(request.id, {
-            tools: await this.server.listTools(capability),
-          });
-
+          return this.ok(id, { tools: await this.server.listTools(capability) });
         case "tools/call": {
           const name = String(request.params?.name ?? "");
           const argumentsValue = (request.params?.arguments ?? {}) as Record<string, unknown>;
-          return this.ok(
-            request.id,
-            await this.server.callTool(capability, {
-              callId: String(request.id ?? crypto.randomUUID()),
-              name,
-              arguments: argumentsValue,
-            }),
-          );
+          return this.ok(id, await this.server.callTool(capability, {
+            callId: String(id ?? crypto.randomUUID()),
+            name,
+            arguments: argumentsValue,
+          }));
         }
-
         default:
-          return {
-            jsonrpc: "2.0",
-            id: request.id ?? null,
-            error: { code: -32601, message: `Method not found: ${request.method}` },
-          };
+          return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${request.method}` } };
       }
     } catch (error) {
-      return {
-        jsonrpc: "2.0",
-        id: request.id ?? null,
-        error: { code: -32000, message: error instanceof Error ? error.message : String(error) },
-      };
+      return { jsonrpc: "2.0", id: request.id ?? null, error: { code: -32000, message: error instanceof Error ? error.message : String(error) } };
     }
   }
 
   private ok(id: JsonRpcResponse["id"], result: unknown): JsonRpcResponse {
-    return { jsonrpc: "2.0", id: id ?? null, result };
+    return { jsonrpc: "2.0", id, result };
   }
 }
