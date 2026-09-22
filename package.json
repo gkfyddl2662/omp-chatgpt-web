@@ -13,7 +13,8 @@
     "chatgpt:login": "npm run build && node dist/cli.js browser-login",
     "chatgpt:setup": "npm run build && node dist/cli.js browser-setup",
     "chatgpt:doctor": "npm run build && node dist/cli.js doctor",
-    "chatgpt:chat": "npm run build && node dist/cli.js chat"
+    "chatgpt:chat": "npm run build && node dist/cli.js chat",
+    "omp:adapter-check": "npm run build && node dist/adapter-check.js"
   },
   "dependencies": {
     "playwright-core": "^1.62.0"
