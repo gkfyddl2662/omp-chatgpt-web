@@ -1,21 +1,25 @@
 import type { CapabilityBroker } from "../capability-broker.js";
 import type { ToolExecutionRequest } from "../types.js";
+import { McpToolCallRouter } from "./tool-call-router.js";
 
 export interface OmpNativeMcpServerOptions {
   broker: CapabilityBroker;
+  router: McpToolCallRouter;
 }
 
 /**
- * MCP boundary skeleton.
+ * MCP boundary.
  *
- * This is intentionally transport-agnostic. OpenAI Secure MCP Tunnel will
- * connect to this boundary in the next phase.
+ * Authorization is resolved before any OMP tool execution. The tunnel only
+ * transports requests; capability routing remains local.
  */
 export class OmpNativeMcpServer {
   readonly #broker: CapabilityBroker;
+  readonly #router: McpToolCallRouter;
 
   constructor(options: OmpNativeMcpServerOptions) {
     this.#broker = options.broker;
+    this.#router = options.router;
   }
 
   async listTools(capability: string) {
@@ -26,6 +30,6 @@ export class OmpNativeMcpServer {
     capability: string,
     request: ToolExecutionRequest,
   ) {
-    return this.#broker.invoke(capability, request);
+    return this.#router.call(capability, request);
   }
 }
