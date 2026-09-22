@@ -5,4 +5,5 @@ export * from "./provider/chatgpt-web-provider.js";
 export * from "./provider/chatgpt-web-stream.js";
 export * from "./mcp/index.js";
 export * from "./omp/index.js";
+export * from "./omp/tool-dispatcher.js";
 export * from "./types.js";
