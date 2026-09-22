@@ -11,6 +11,7 @@
     "mcp:smoke": "npm run build && node dist/mcp/stdio-smoke.js",
     "mcp:e2e": "npm run build && node dist/mcp/e2e-smoke.js",
     "mcp:tunnel:smoke": "npm run build && node dist/mcp/tunnel-smoke.js",
+    "mcp:tunnel:check": "npm run build && node dist/mcp/tunnel-check.js",
     "mcp:server": "npm run build && node dist/mcp/stdio-main.js",
     "mcp:tunnel": "npm run build && node dist/mcp/tunnel-main.js",
     "mcp:doctor": "npm run build && node dist/mcp/doctor.js",
