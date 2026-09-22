@@ -5,10 +5,9 @@ import { OmpMcpProtocolServer } from "./protocol-server.js";
 const { mcp, contexts, broker, runtime } = createBootstrapRuntime();
 const protocol = new OmpMcpProtocolServer(mcp);
 
-const capability = "stdio-smoke-capability";
 const controller = new AbortController();
 
-broker.bind({
+const capability = broker.bind({
   sessionId: "stdio-session",
   turnId: "stdio-turn",
   cwd: process.cwd(),
