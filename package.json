@@ -12,6 +12,7 @@
     "mcp:e2e": "npm run build && node dist/mcp/e2e-smoke.js",
     "mcp:server": "npm run build && node dist/mcp/stdio-main.js",
     "mcp:tunnel": "npm run build && node dist/mcp/tunnel-main.js",
+    "mcp:doctor": "npm run build && node dist/mcp/doctor.js",
     "verify": "npm run typecheck && npm run smoke && npm run mcp:smoke && npm run mcp:e2e",
     "chatgpt:check": "npm run build && node dist/cli.js browser-check",
     "chatgpt:login": "npm run build && node dist/cli.js browser-login",
