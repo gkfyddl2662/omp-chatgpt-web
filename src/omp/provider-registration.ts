@@ -5,8 +5,7 @@ export function getChatGptWebProviderRegistration() {
   const extension = createOmpChatGptWebExtension();
 
   return {
-    extensionId: extension.id,
+    manifest: extension.manifest,
     models: [CHATGPT_WEB_MODEL],
-    providers: extension.providers,
   };
 }
