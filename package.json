@@ -11,6 +11,8 @@
     "verify": "npm run typecheck && npm run smoke",
     "chatgpt:check": "npm run build && node dist/cli.js browser-check",
     "chatgpt:login": "npm run build && node dist/cli.js browser-login",
+    "chatgpt:setup": "npm run build && node dist/cli.js browser-setup",
+    "chatgpt:doctor": "npm run build && node dist/cli.js doctor",
     "chatgpt:chat": "npm run build && node dist/cli.js chat"
   },
   "dependencies": {
