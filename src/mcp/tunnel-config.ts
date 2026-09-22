@@ -1,3 +1,5 @@
+import { loadLocalEnv } from "./env-loader.js";
+
 export interface SecureMcpTunnelConfig {
   tunnelId: string;
   runtimeKey: string;
@@ -10,6 +12,8 @@ export interface SecureMcpTunnelConfig {
  * remains inside the OMP capability broker.
  */
 export function createTunnelConfigFromEnv(): SecureMcpTunnelConfig {
+  loadLocalEnv();
+
   return {
     tunnelId: requireEnv("OPENAI_MCP_TUNNEL_ID"),
     runtimeKey: requireEnv("OPENAI_MCP_RUNTIME_KEY"),
