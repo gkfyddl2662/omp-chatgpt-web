@@ -8,7 +8,13 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "smoke": "npm run build && node dist/smoke.js",
-    "verify": "npm run typecheck && npm run smoke"
+    "verify": "npm run typecheck && npm run smoke",
+    "chatgpt:check": "npm run build && node dist/cli.js browser-check",
+    "chatgpt:login": "npm run build && node dist/cli.js browser-login",
+    "chatgpt:chat": "npm run build && node dist/cli.js chat"
+  },
+  "dependencies": {
+    "playwright-core": "^1.62.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
