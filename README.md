@@ -34,18 +34,28 @@ The model backend and the tool path are intentionally separate. OMP does not ask
 
 ## Current status
 
-The bootstrap branch contains:
+Implemented on the bootstrap branch:
 
-- a fail-closed backend policy
-- a turn-scoped capability broker skeleton
-- the initial OMP tool-runtime boundary
-- architecture/security documents
-- an implementation roadmap
+- fail-closed backend policy
+- browser-level guard against direct OpenAI API inference and Codex/Work navigation
+- turn-scoped capability broker skeleton
+- minimal managed Chrome/Edge runtime for normal ChatGPT Temporary Chat
+- login/check/chat CLI probes
+- Windows verification scripts that copy full results to the clipboard
+- architecture/security documents and phased roadmap
 
-The next milestone is an end-to-end **normal ChatGPT Web -> native MCP -> OMP `read`** round trip.
+The current browser runtime is a Phase 1 probe. It is not yet wired into OMP's custom provider registry, and native MCP/tunnel execution is not yet enabled.
+
+The next end-to-end milestones are:
+
+```text
+OMP provider -> normal ChatGPT Web -> final text -> OMP
+ChatGPT Web -> native MCP read() -> Secure MCP Tunnel -> OMP
+```
 
 See:
 
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security-model.md)
 - [Roadmap](docs/roadmap.md)
+- [Windows local validation](docs/local-validation.md)
