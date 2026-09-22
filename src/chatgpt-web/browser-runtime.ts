@@ -1,7 +1,13 @@
 import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { chromium, type BrowserContext, type Locator, type Page } from "playwright-core";
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "playwright-core";
 import { classifyBrowserRequest } from "./network-policy.js";
 import {
   CHATGPT_ASSISTANT_TURN_SELECTOR,
@@ -14,6 +20,7 @@ import {
 export interface ChatGptBrowserRuntimeOptions {
   profileDir?: string;
   executablePath?: string;
+  cdpUrl?: string;
   navigationTimeoutMs?: number;
   responseTimeoutMs?: number;
 }
@@ -30,7 +37,7 @@ export interface ChatGptTurnResult {
 
 export class ChatGptAuthRequiredError extends Error {
   constructor() {
-    super("ChatGPT login is required in the managed browser profile.");
+    super("ChatGPT login is required in the dedicated browser profile.");
     this.name = "ChatGptAuthRequiredError";
   }
 }
@@ -115,13 +122,16 @@ export class ChatGptBrowserRuntime {
   readonly #options: Required<
     Pick<ChatGptBrowserRuntimeOptions, "profileDir" | "navigationTimeoutMs" | "responseTimeoutMs">
   > &
-    Pick<ChatGptBrowserRuntimeOptions, "executablePath">;
+    Pick<ChatGptBrowserRuntimeOptions, "executablePath" | "cdpUrl">;
+  #browser?: Browser;
   #context?: BrowserContext;
+  #ownsBrowser = false;
 
   constructor(options: ChatGptBrowserRuntimeOptions = {}) {
     this.#options = {
       profileDir: options.profileDir ?? defaultProfileDir(),
       executablePath: options.executablePath,
+      cdpUrl: options.cdpUrl ?? process.env.OMP_CHATGPT_WEB_CDP_URL,
       navigationTimeoutMs: options.navigationTimeoutMs ?? 60_000,
       responseTimeoutMs: options.responseTimeoutMs ?? 5 * 60_000,
     };
@@ -131,17 +141,38 @@ export class ChatGptBrowserRuntime {
     return this.#options.profileDir;
   }
 
+  get connectionMode(): "cdp" | "playwright-launch" {
+    return this.#options.cdpUrl ? "cdp" : "playwright-launch";
+  }
+
   async start(): Promise<void> {
     if (this.#context) return;
 
-    const executablePath = this.#options.executablePath ?? (await detectBrowserExecutable());
-    const context = await chromium.launchPersistentContext(this.#options.profileDir, {
-      executablePath,
-      headless: false,
-      viewport: null,
-      args: ["--start-maximized"],
-    });
+    if (this.#options.cdpUrl) {
+      const browser = await chromium.connectOverCDP(this.#options.cdpUrl, {
+        timeout: this.#options.navigationTimeoutMs,
+        noDefaults: true,
+      });
+      const context = browser.contexts()[0];
+      if (!context) {
+        await browser.close().catch(() => {});
+        throw new Error("CDP browser did not expose its default browser context.");
+      }
+      this.#browser = browser;
+      this.#context = context;
+      this.#ownsBrowser = false;
+    } else {
+      const executablePath = this.#options.executablePath ?? (await detectBrowserExecutable());
+      this.#context = await chromium.launchPersistentContext(this.#options.profileDir, {
+        executablePath,
+        headless: false,
+        viewport: null,
+        args: ["--start-maximized"],
+      });
+      this.#ownsBrowser = true;
+    }
 
+    const context = this.#context;
     await context.route("**/*", async (route) => {
       const request = route.request();
       const verdict = classifyBrowserRequest(request.url(), {
@@ -153,14 +184,23 @@ export class ChatGptBrowserRuntime {
       }
       await route.continue();
     });
-
-    this.#context = context;
   }
 
   async close(): Promise<void> {
     const context = this.#context;
+    const browser = this.#browser;
+    const ownsBrowser = this.#ownsBrowser;
+
     this.#context = undefined;
-    if (context) await context.close();
+    this.#browser = undefined;
+    this.#ownsBrowser = false;
+
+    if (browser) {
+      await browser.close().catch(() => {});
+      return;
+    }
+
+    if (ownsBrowser && context) await context.close().catch(() => {});
   }
 
   async openLogin(): Promise<Page> {
