@@ -4,4 +4,5 @@ export * from "./extension-manifest.js";
 export * from "./model-definition.js";
 export * from "./omp-model-registry.js";
 export * from "./registry-runtime.js";
+export * from "./runtime-bootstrap.js";
 export * from "./tools/index.js";
