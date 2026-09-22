@@ -5,7 +5,7 @@
 - [x] Record non-negotiable backend/tooling invariants
 - [x] Add turn capability broker skeleton
 - [x] Add fail-closed inference backend policy
-- [ ] Wire CI/typecheck
+- [x] Wire CI/typecheck/smoke verification
 
 ## Phase 1 — ChatGPT Web backend, no tools
 
