@@ -16,4 +16,36 @@ Use **normal ChatGPT Web chat** as the model backend for **Oh My Pi**, while kee
 - **OpenAI API model inference:** forbidden
 - **Fallback:** none
 
-See `docs/architecture.md` once the bootstrap branch lands.
+## Intended flow
+
+```text
+OMP
+ -> normal ChatGPT Web chat
+ -> native ChatGPT MCP call
+ -> OpenAI Secure MCP Tunnel
+ -> OMP capability broker
+ -> current OMP tool runtime
+ -> MCP result
+ -> same ChatGPT response continues
+ -> final text returns to OMP
+```
+
+The model backend and the tool path are intentionally separate. OMP does not ask the model to emit JSON tool calls, and ChatGPT Web must not silently fall back to Codex, Work, or API inference.
+
+## Current status
+
+The bootstrap branch contains:
+
+- a fail-closed backend policy
+- a turn-scoped capability broker skeleton
+- the initial OMP tool-runtime boundary
+- architecture/security documents
+- an implementation roadmap
+
+The next milestone is an end-to-end **normal ChatGPT Web -> native MCP -> OMP `read`** round trip.
+
+See:
+
+- [Architecture](docs/architecture.md)
+- [Security model](docs/security-model.md)
+- [Roadmap](docs/roadmap.md)
