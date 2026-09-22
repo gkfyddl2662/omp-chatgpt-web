@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { createBootstrapRuntime } from "../omp/runtime-bootstrap.js";
 
-const { mcp, broker, contexts } = createBootstrapRuntime();
-const controller = new AbortController();
+const { mcp, contexts } = createBootstrapRuntime();
 const capability = "smoke-capability";
 
 contexts.register({
@@ -11,8 +10,6 @@ contexts.register({
   turnId: "smoke-turn",
   cwd: process.cwd(),
 });
-
-broker;
 
 const result = await mcp.callTool(capability, {
   callId: "read-smoke",
@@ -24,6 +21,5 @@ const result = await mcp.callTool(capability, {
 
 assert.equal(result.isError, false);
 assert.equal(result.content[0]?.type, "text");
-controller.abort();
 
-console.log("MCP read smoke: PASS");
+console.log("MCP read e2e smoke: PASS");
