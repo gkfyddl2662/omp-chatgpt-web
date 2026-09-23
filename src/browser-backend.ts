@@ -8,6 +8,7 @@ import {
   type Page,
 } from "playwright-core";
 import type { RuntimeConfig } from "./config.js";
+import { assertValidCompactionSummary } from "./compaction.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -735,11 +736,14 @@ export class ChatGptBrowserBackend {
         submitMs: submittedAt - insertedAt,
       };
 
-      const summary = await this.#waitForAssistantText(
-        page,
-        config.turnTimeoutMs,
-        signal,
-        baselineAssistants,
+      const summary = assertValidCompactionSummary(
+        await this.#waitForAssistantText(
+          page,
+          config.turnTimeoutMs,
+          signal,
+          baselineAssistants,
+        ),
+        prompt,
       );
 
       // The compact response is generated from the retained thread, but OMP
@@ -1593,6 +1597,44 @@ export class ChatGptBrowserBackend {
     );
   }
 
+  async #chatErrorState(page: Page): Promise<{
+    message: string;
+    retry?: Locator;
+  } | undefined> {
+    const retry = await firstVisible(
+      [
+        page.getByRole("button", { name: /Retry|Try again|다시 시도/i }),
+        page.locator("button").filter({
+          hasText: /Retry|Try again|다시 시도/i,
+        }),
+      ],
+      100,
+    );
+
+    const errorText = await firstVisible(
+      [
+        page.getByText(
+          /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center/i,
+        ),
+        page.getByText(/문제가 발생했습니다|오류가 발생했습니다/),
+      ],
+      100,
+    );
+
+    if (!retry && !errorText) return undefined;
+
+    const message = (
+      (await errorText?.innerText().catch(() => "")) ||
+      (await retry?.innerText().catch(() => "")) ||
+      "ChatGPT reported an unknown retryable error."
+    ).trim();
+
+    return {
+      message,
+      ...(retry ? { retry } : {}),
+    };
+  }
+
   async #stopButton(page: Page): Promise<Locator | undefined> {
     return firstVisible(
       [
@@ -1648,6 +1690,7 @@ export class ChatGptBrowserBackend {
     const deadline = Date.now() + timeoutMs;
     let lastText = "";
     let stableSince = 0;
+    let retryAttempts = 0;
 
     while (Date.now() < deadline) {
       if (signal?.aborted) {
@@ -1655,6 +1698,22 @@ export class ChatGptBrowserBackend {
           new DOMException("Text-only Web request aborted", "AbortError");
       }
       if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+
+      const errorState = await this.#chatErrorState(page);
+      if (errorState) {
+        if (retryAttempts < 1 && errorState.retry) {
+          retryAttempts += 1;
+          lastText = "";
+          stableSince = 0;
+          await errorState.retry.click();
+          await sleep(750);
+          continue;
+        }
+        throw new Error(
+          "ChatGPT Web returned an error instead of a valid response: " +
+            errorState.message,
+        );
+      }
 
       const assistantTurns = page.locator(
         '[data-message-author-role="assistant"]',
@@ -1682,6 +1741,13 @@ export class ChatGptBrowserBackend {
         Date.now() - stableSince >= 1_500 &&
         !stop
       ) {
+        const finalErrorState = await this.#chatErrorState(page);
+        if (finalErrorState) {
+          throw new Error(
+            "ChatGPT Web returned an error instead of a valid response: " +
+              finalErrorState.message,
+          );
+        }
         return lastText;
       }
       await sleep(250);
