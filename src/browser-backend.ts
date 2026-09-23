@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { chromium, type BrowserContext, type Locator, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
 import type { RuntimeConfig } from "./config.js";
 
 function sleep(ms: number): Promise<void> {
@@ -23,35 +24,84 @@ interface BrowserTurn {
 }
 
 export class ChatGptBrowserBackend {
+  #browser?: Browser;
   #context?: BrowserContext;
   readonly #turns = new Map<string, BrowserTurn>();
 
-  async open(config: RuntimeConfig): Promise<Page> {
+  async openLogin(config: RuntimeConfig): Promise<void> {
     if (!config.browserExecutable) {
       throw new Error(
         "No Chrome/Chromium executable was found. Set OMP_CHATGPT_WEB_BROWSER to the browser executable.",
       );
     }
-    if (!this.#context) {
-      await mkdir(config.browserProfileDir, { recursive: true });
-      this.#context = await chromium.launchPersistentContext(config.browserProfileDir, {
-        executablePath: config.browserExecutable,
-        headless: !config.headed,
-        viewport: { width: 1440, height: 1000 },
-        args: ["--disable-background-timer-throttling"],
-      });
+
+    await mkdir(config.browserProfileDir, { recursive: true });
+
+    const endpoint = "http://127.0.0.1:" + config.browserCdpPort;
+    if (await this.#cdpReady(endpoint)) return;
+
+    const child = spawn(
+      config.browserExecutable,
+      [
+        "--remote-debugging-port=" + config.browserCdpPort,
+        "--user-data-dir=" + config.browserProfileDir,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://chatgpt.com/",
+      ],
+      {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+      },
+    );
+    child.unref();
+
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if (await this.#cdpReady(endpoint)) return;
+      await sleep(250);
     }
-    const page = this.#context.pages()[0] ?? await this.#context.newPage();
-    if (!page.url().startsWith("https://chatgpt.com/")) {
-      await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
-    }
-    await page.bringToFront();
-    return page;
+
+    throw new Error(
+      "Chrome opened but its DevTools endpoint did not become ready on " +
+        endpoint +
+        ". Close Chrome processes using the OMP profile and retry /web-open.",
+    );
   }
 
-  async status(): Promise<{ open: boolean; activeTurns: number; urls: string[] }> {
+  async #connect(config: RuntimeConfig): Promise<BrowserContext> {
+    if (this.#context) return this.#context;
+
+    await this.openLogin(config);
+
+    const endpoint = "http://127.0.0.1:" + config.browserCdpPort;
+    this.#browser = await chromium.connectOverCDP(endpoint);
+    this.#context = this.#browser.contexts()[0];
+
+    if (!this.#context) {
+      throw new Error("Connected to Chrome over CDP but no browser context was available.");
+    }
+
+    return this.#context;
+  }
+
+  async #cdpReady(endpoint: string): Promise<boolean> {
+    try {
+      const response = await fetch(endpoint + "/json/version", { signal: AbortSignal.timeout(750) });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async status(config?: RuntimeConfig): Promise<{ open: boolean; attached: boolean; activeTurns: number; urls: string[] }> {
+    const open = config
+      ? await this.#cdpReady("http://127.0.0.1:" + config.browserCdpPort)
+      : Boolean(this.#context);
     return {
-      open: Boolean(this.#context),
+      open,
+      attached: Boolean(this.#context),
       activeTurns: this.#turns.size,
       urls: [...this.#turns.values()].map(turn => turn.page.url()),
     };
@@ -65,10 +115,11 @@ export class ChatGptBrowserBackend {
     if (this.#turns.has(sessionKey)) {
       throw new Error("ChatGPT Web turn already exists for session " + sessionKey);
     }
-    const anchor = await this.open(config);
-    const page = this.#turns.size === 0 && anchor.url().startsWith("https://chatgpt.com/")
-      ? anchor
-      : await this.#context!.newPage();
+    const context = await this.#connect(config);
+    const existing = context.pages().find(page => page.url().startsWith("https://chatgpt.com/"));
+    const page = this.#turns.size === 0 && existing
+      ? existing
+      : await context.newPage();
 
     await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
     let composer = await this.#requireComposer(page);
@@ -98,8 +149,8 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
-    await this.open(config);
-    const page = await this.#context!.newPage();
+    const context = await this.#connect(config);
+    const page = await context.newPage();
     try {
       if (signal?.aborted) {
         throw signal.reason ?? new DOMException("Text-only Web request aborted", "AbortError");
@@ -131,9 +182,10 @@ export class ChatGptBrowserBackend {
   async close(): Promise<void> {
     const keys = [...this.#turns.keys()];
     await Promise.allSettled(keys.map(key => this.releaseTurn(key)));
-    const context = this.#context;
+    const browser = this.#browser;
+    this.#browser = undefined;
     this.#context = undefined;
-    if (context) await context.close();
+    if (browser) await browser.close();
   }
 
   async #composer(page: Page): Promise<Locator | undefined> {
