@@ -276,29 +276,35 @@ the built-in help and available subcommands.
 | `/web set browser <path>` | Persist an explicit browser executable |
 | `/web set cdp <port>` | Persist the local Chrome DevTools port |
 | `/web set subagents <count>` | Persist the Web subagent hard cap (`-1`/`off` = unlimited) |
-| `/web set insert default\|lexical` | Select the composer insertion strategy; `lexical` is an experimental direct Lexical-editor fast path |
+| `/web set insert default\|editor` | Select the composer insertion strategy; `editor` is an experimental direct ProseMirror/Lexical fast path |
 | `/web unset tunnel\|api\|tunnel-bin\|connector\|browser\|subagents\|insert` | Clear a persisted value, restore the default subagent cap, or restore the default insert strategy |
 
 The older `/web-open`, `/web-use`, `/web-status`, `/web-tunnel`, and
 `/web-config` commands remain available as compatibility aliases.
 
-### Experimental Lexical insertion
+### Experimental direct editor insertion
 
 Large OMP prompts can spend minutes inside Chromium's contenteditable insertion
 path. To test a direct editor-state path without changing prompt content:
 
 ```text
-/web set insert lexical
+/web set insert editor
 ```
 
-When available, the provider discovers ChatGPT's Lexical editor from the
-composer DOM and dispatches its registered
-`CONTROLLED_TEXT_INSERTION_COMMAND` once with the complete prompt. Successful
-turns report `mode=lexical` in `/web status`.
+The provider first probes the active ChatGPT composer for a ProseMirror
+`EditorView`. When found, it inserts the complete prompt at the current
+selection with one `state.tr.insertText(...)` transaction and dispatches that
+transaction directly, preserving the already-selected connector pill.
+Successful turns report `mode=prosemirror` in `/web status`.
 
-If the current ChatGPT build does not expose the expected Lexical editor or
-command, the attempt does not mutate the composer and falls back to the normal
-`execCommand` / CDP path. To restore the normal strategy:
+A Lexical direct-command path remains as a secondary compatibility probe for
+other ChatGPT composer variants. If neither editor can be reached safely, the
+provider falls back to the normal `execCommand` / CDP path. The status timing
+includes a `detail=...` field so the fallback reason is visible.
+
+The previous `/web set insert lexical` value is accepted as a legacy alias for
+`editor`, so existing persisted experimental configs keep working after an
+upgrade. To restore the normal strategy:
 
 ```text
 /web set insert default
@@ -322,7 +328,7 @@ Start with:
 - active turns and pending compactions
 - shared root/subagent Web session count
 - current root-session subagent usage and hard limit
-- latest prompt preparation timings
+- latest prompt preparation timings, insertion mode, and direct-editor probe detail
 
 If OMP reports that `tunnel-client` cannot be found after a restart, persist
 its full executable path with `/web-config tunnel-bin ...`.

@@ -43,7 +43,8 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "lexical" | "execCommand" | "cdp";
+  insertMode: "prosemirror" | "lexical" | "execCommand" | "cdp";
+  insertDetail?: string;
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -453,9 +454,10 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     let insertion: {
-      mode: "lexical" | "execCommand" | "cdp";
+      mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
       editMs: number;
       verifyMs: number;
+      detail?: string;
     };
     let insertedAt: number;
 
@@ -466,6 +468,13 @@ export class ChatGptBrowserBackend {
         " " + prompt,
         config.insertMode,
       );
+      if (!(await this.#selectedConnectorIsExact(composer, config.connectorName))) {
+        throw new Error(
+          'ChatGPT lost the exact connector "' +
+            config.connectorName +
+            '" while inserting the provider prompt.',
+        );
+      }
       insertedAt = Date.now();
     } catch (error) {
       await this.#recoverUnsubmittedTurn(sessionKey, composer);
@@ -482,6 +491,7 @@ export class ChatGptBrowserBackend {
         mentionMs: mentionReadyAt - sessionReadyAt,
         insertMs: insertedAt - mentionReadyAt,
         insertMode: insertion.mode,
+        ...(insertion.detail ? { insertDetail: insertion.detail } : {}),
         insertEditMs: insertion.editMs,
         insertVerifyMs: insertion.verifyMs,
         submitMs: submittedAt - insertedAt,
@@ -816,82 +826,383 @@ export class ChatGptBrowserBackend {
     text: string,
     strategy: RuntimeConfig["insertMode"],
   ): Promise<{
-    mode: "lexical" | "execCommand" | "cdp";
+    mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
     editMs: number;
     verifyMs: number;
+    detail?: string;
   }> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
     const editStartedAt = Date.now();
 
     let inserted = false;
-    let mode: "lexical" | "execCommand" | "cdp" = "execCommand";
+    let mode: "prosemirror" | "lexical" | "execCommand" | "cdp" = "execCommand";
+    let detail: string | undefined;
 
-    if (strategy === "lexical") {
-      // Experimental fast path: ChatGPT's contenteditable composer is backed
-      // by Lexical. Lexical stores its editor instance on the root DOM node,
-      // and its registered commands carry stable type labels. Dispatching
-      // CONTROLLED_TEXT_INSERTION_COMMAND with the whole provider prompt lets
-      // Lexical perform one editor update instead of routing a huge string
-      // through Chromium's execCommand/Input.insertText editing path.
-      //
-      // This intentionally uses only runtime-discovered private state. If the
-      // current ChatGPT build stops exposing the editor or command, the
-      // attempt returns false before mutating content and falls back below.
-      inserted = await composer.evaluate((element, value) => {
-        type LexicalCommandLike = { type?: string };
-        type LexicalEditorLike = {
-          _commands?: Map<LexicalCommandLike, unknown>;
-          dispatchCommand?: (command: LexicalCommandLike, payload: string) => boolean;
-          focus?: (
-            callback?: () => void,
-            options?: { defaultSelection?: "rootStart" | "rootEnd" },
-          ) => void;
+    if (strategy === "editor") {
+      const proseMirror = await composer.evaluate((element, value) => {
+        type EditorViewLike = {
+          dom?: HTMLElement;
+          state?: {
+            doc?: unknown;
+            selection?: { from?: number; to?: number };
+            tr?: {
+              insertText?: (
+                text: string,
+                from?: number,
+                to?: number,
+              ) => unknown;
+            };
+          };
+          dispatch?: (transaction: unknown) => void;
+          focus?: () => void;
+        };
+
+        const isEditorView = (value: unknown): value is EditorViewLike => {
+          if (!value || typeof value !== "object") return false;
+          const candidate = value as EditorViewLike;
+          return Boolean(
+            typeof candidate.dispatch === "function" &&
+            candidate.state?.doc &&
+            candidate.state?.tr,
+          );
+        };
+
+        const findInGraph = (
+          root: unknown,
+          maxDepth: number,
+          maxNodes: number,
+        ): EditorViewLike | undefined => {
+          if (!root || typeof root !== "object") return undefined;
+
+          const seen = new WeakSet<object>();
+          const queue: Array<{ value: object; depth: number }> = [
+            { value: root as object, depth: 0 },
+          ];
+          let visited = 0;
+
+          while (queue.length > 0 && visited < maxNodes) {
+            const item = queue.shift();
+            if (!item) break;
+            const value = item.value;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            visited += 1;
+
+            if (isEditorView(value)) return value;
+            if (
+              item.depth >= maxDepth ||
+              value instanceof Node ||
+              value === window ||
+              value === document
+            ) {
+              continue;
+            }
+
+            let propertyNames: string[];
+            try {
+              propertyNames = Object.getOwnPropertyNames(value);
+            } catch {
+              continue;
+            }
+
+            for (const propertyName of propertyNames) {
+              let child: unknown;
+              try {
+                child = (value as Record<string, unknown>)[propertyName];
+              } catch {
+                continue;
+              }
+              if (
+                child &&
+                typeof child === "object" &&
+                !seen.has(child as object)
+              ) {
+                queue.push({
+                  value: child as object,
+                  depth: item.depth + 1,
+                });
+              }
+            }
+          }
+
+          return undefined;
+        };
+
+        const findFromElement = (
+          root: HTMLElement,
+          expectedComposer: HTMLElement,
+        ): EditorViewLike | undefined => {
+          let current: HTMLElement | null = root;
+
+          while (current) {
+            let propertyNames: string[] = [];
+            try {
+              propertyNames = Object.getOwnPropertyNames(current);
+            } catch {
+              // Keep walking ancestors.
+            }
+
+            for (const propertyName of propertyNames) {
+              let candidate: unknown;
+              try {
+                candidate = (
+                  current as HTMLElement & Record<string, unknown>
+                )[propertyName];
+              } catch {
+                continue;
+              }
+
+              const direct = isEditorView(candidate)
+                ? candidate
+                : findInGraph(candidate, 4, 400);
+              if (
+                direct &&
+                direct.dom instanceof HTMLElement &&
+                (
+                  direct.dom === expectedComposer ||
+                  direct.dom.contains(expectedComposer) ||
+                  expectedComposer.contains(direct.dom)
+                )
+              ) {
+                return direct;
+              }
+            }
+
+            const pmViewDesc = (
+              current as HTMLElement & { pmViewDesc?: unknown }
+            ).pmViewDesc;
+            const fromPm = findInGraph(pmViewDesc, 7, 1_000);
+            if (
+              fromPm &&
+              fromPm.dom instanceof HTMLElement &&
+              (
+                fromPm.dom === expectedComposer ||
+                fromPm.dom.contains(expectedComposer) ||
+                expectedComposer.contains(fromPm.dom)
+              )
+            ) {
+              return fromPm;
+            }
+
+            current = current.parentElement;
+          }
+
+          return undefined;
         };
 
         const el = element as HTMLElement;
-        let current: HTMLElement | null = el;
-        let editor: LexicalEditorLike | undefined;
-
-        while (current) {
-          const candidate = (
-            current as HTMLElement & { __lexicalEditor?: LexicalEditorLike }
-          ).__lexicalEditor;
-          if (
-            candidate &&
-            typeof candidate.dispatchCommand === "function" &&
-            candidate._commands
-          ) {
-            editor = candidate;
-            break;
-          }
-          current = current.parentElement;
+        const candidates: HTMLElement[] = [el];
+        const closestProseMirror = el.closest(".ProseMirror");
+        if (
+          closestProseMirror instanceof HTMLElement &&
+          closestProseMirror !== el
+        ) {
+          candidates.push(closestProseMirror);
+        }
+        const promptTextArea = document.querySelector("#prompt-textarea");
+        if (
+          promptTextArea instanceof HTMLElement &&
+          !candidates.includes(promptTextArea)
+        ) {
+          candidates.push(promptTextArea);
+        }
+        const visibleProseMirror = document.querySelector(".ProseMirror");
+        if (
+          visibleProseMirror instanceof HTMLElement &&
+          !candidates.includes(visibleProseMirror)
+        ) {
+          candidates.push(visibleProseMirror);
         }
 
-        if (!editor?.dispatchCommand || !editor._commands) return false;
-
-        let insertCommand: LexicalCommandLike | undefined;
-        for (const command of editor._commands.keys()) {
-          if (command?.type === "CONTROLLED_TEXT_INSERTION_COMMAND") {
-            insertCommand = command;
-            break;
-          }
+        let view: EditorViewLike | undefined;
+        for (const candidate of candidates) {
+          view = findFromElement(candidate, el);
+          if (view) break;
         }
-        if (!insertCommand) return false;
 
+        if (!view?.state || typeof view.dispatch !== "function") {
+          return {
+            status: "unavailable" as const,
+            reason: "prosemirror-view-not-found",
+          };
+        }
+
+        const selection = view.state.selection;
+        const transaction = view.state.tr;
+        if (
+          !selection ||
+          typeof selection.from !== "number" ||
+          typeof selection.to !== "number" ||
+          !transaction ||
+          typeof transaction.insertText !== "function"
+        ) {
+          return {
+            status: "unavailable" as const,
+            reason: "prosemirror-transaction-unavailable",
+          };
+        }
+
+        let dispatchStarted = false;
         try {
-          // Lexical focus creates/restores its internal RangeSelection
-          // synchronously. The connector selection has already positioned the
-          // caret after its pill; rootEnd is only the fallback when Lexical has
-          // no retained selection.
-          editor.focus?.(undefined, { defaultSelection: "rootEnd" });
-          return editor.dispatchCommand(insertCommand, String(value)) === true;
-        } catch {
-          return false;
-        }
-      }, text).catch(() => false);
+          view.focus?.();
+          const latestState = view.state;
+          const latestSelection = latestState?.selection ?? selection;
+          const latestTransaction = latestState?.tr ?? transaction;
+          if (
+            !latestSelection ||
+            typeof latestSelection.from !== "number" ||
+            typeof latestSelection.to !== "number" ||
+            !latestTransaction ||
+            typeof latestTransaction.insertText !== "function"
+          ) {
+            return {
+              status: "unavailable" as const,
+              reason: "prosemirror-selection-unavailable",
+            };
+          }
 
-      if (inserted) mode = "lexical";
+          // Insert after the current selection rather than replacing it.
+          // If ChatGPT leaves the connector pill as a ProseMirror NodeSelection,
+          // selection.to is the position immediately after that atom, so the
+          // app pill remains attached.
+          const insertionPos = latestSelection.to;
+          const next = latestTransaction.insertText(
+            String(value),
+            insertionPos,
+            insertionPos,
+          );
+          dispatchStarted = true;
+          view.dispatch(next);
+          view.focus?.();
+          return {
+            status: "inserted" as const,
+            reason: "prosemirror-transaction",
+          };
+        } catch {
+          return {
+            status: dispatchStarted ? "ambiguous" as const : "unavailable" as const,
+            reason: dispatchStarted
+              ? "prosemirror-dispatch-ambiguous"
+              : "prosemirror-insert-failed",
+          };
+        }
+      }, text).catch(() => ({
+        status: "unavailable" as const,
+        reason: "prosemirror-probe-error",
+      }));
+
+      if (proseMirror.status === "ambiguous") {
+        throw new Error(
+          "ChatGPT ProseMirror insertion became ambiguous after dispatch; " +
+            "refusing to retry and risk duplicate prompt text.",
+        );
+      }
+      if (proseMirror.status === "inserted") {
+        inserted = true;
+        mode = "prosemirror";
+        detail = proseMirror.reason;
+      } else {
+        detail = proseMirror.reason;
+      }
+
+      if (!inserted) {
+        const lexical = await composer.evaluate((element, value) => {
+          type LexicalCommandLike = { type?: string };
+          type LexicalEditorLike = {
+            _commands?: Map<LexicalCommandLike, unknown>;
+            dispatchCommand?: (
+              command: LexicalCommandLike,
+              payload: string,
+            ) => boolean;
+            focus?: (
+              callback?: () => void,
+              options?: { defaultSelection?: "rootStart" | "rootEnd" },
+            ) => void;
+          };
+
+          const el = element as HTMLElement;
+          let current: HTMLElement | null = el;
+          let editor: LexicalEditorLike | undefined;
+
+          while (current) {
+            const candidate = (
+              current as HTMLElement & { __lexicalEditor?: LexicalEditorLike }
+            ).__lexicalEditor;
+            if (
+              candidate &&
+              typeof candidate.dispatchCommand === "function" &&
+              candidate._commands
+            ) {
+              editor = candidate;
+              break;
+            }
+            current = current.parentElement;
+          }
+
+          if (!editor?.dispatchCommand || !editor._commands) {
+            return {
+              status: "unavailable" as const,
+              reason: "lexical-editor-not-found",
+            };
+          }
+
+          let insertCommand: LexicalCommandLike | undefined;
+          for (const command of editor._commands.keys()) {
+            if (command?.type === "CONTROLLED_TEXT_INSERTION_COMMAND") {
+              insertCommand = command;
+              break;
+            }
+          }
+          if (!insertCommand) {
+            return {
+              status: "unavailable" as const,
+              reason: "lexical-command-not-found",
+            };
+          }
+
+          let dispatchStarted = false;
+          try {
+            editor.focus?.(undefined, { defaultSelection: "rootEnd" });
+            dispatchStarted = true;
+            const handled =
+              editor.dispatchCommand(insertCommand, String(value)) === true;
+            return handled
+              ? {
+                  status: "inserted" as const,
+                  reason: "lexical-command",
+                }
+              : {
+                  status: "ambiguous" as const,
+                  reason: "lexical-command-unhandled-after-dispatch",
+                };
+          } catch {
+            return {
+              status: dispatchStarted ? "ambiguous" as const : "unavailable" as const,
+              reason: dispatchStarted
+                ? "lexical-dispatch-ambiguous"
+                : "lexical-insert-failed",
+            };
+          }
+        }, text).catch(() => ({
+          status: "unavailable" as const,
+          reason: "lexical-probe-error",
+        }));
+
+        if (lexical.status === "ambiguous") {
+          throw new Error(
+            "ChatGPT Lexical insertion became ambiguous after dispatch; " +
+              "refusing to retry and risk duplicate prompt text.",
+          );
+        }
+        if (lexical.status === "inserted") {
+          inserted = true;
+          mode = "lexical";
+          detail = lexical.reason;
+        } else {
+          detail = (detail ? detail + ";" : "") + lexical.reason;
+        }
+      }
     }
 
     if (!inserted) {
@@ -953,9 +1264,9 @@ export class ChatGptBrowserBackend {
       mode,
       editMs: editedAt - editStartedAt,
       verifyMs: verifiedAt - editedAt,
+      ...(detail ? { detail } : {}),
     };
   }
-
   async #selectedConnectorIsExact(
     composer: Locator,
     connectorName: string,
@@ -1076,7 +1387,7 @@ export class ChatGptBrowserBackend {
 
     await composer.press("Enter");
 
-    // Connector selection can replace the Lexical composer subtree. Resolve
+    // Connector selection can replace the active editor/composer subtree. Resolve
     // the active composer again, then fail closed unless the exact app pill is
     // present. This prevents a first turn from silently proceeding unbound.
     const selectedComposer = await this.#requireComposer(page);

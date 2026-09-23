@@ -4,6 +4,7 @@ import { ChatGptBrowserBackend } from "../../src/browser-backend.js";
 import {
   applyRuntimeConfigPatch,
   loadRuntimeConfig,
+  parseComposerInsertMode,
   persistentConfigPath,
   resetComposerInsertMode,
   resetSubagentLimit,
@@ -275,6 +276,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
                       " mention=" + browserStatus.lastPreparation.mentionMs +
                       " insert=" + browserStatus.lastPreparation.insertMs +
                       " (mode=" + browserStatus.lastPreparation.insertMode +
+                      (browserStatus.lastPreparation.insertDetail
+                        ? " detail=" + browserStatus.lastPreparation.insertDetail
+                        : "") +
                       " edit=" + browserStatus.lastPreparation.insertEditMs +
                       " verify=" + browserStatus.lastPreparation.insertVerifyMs + ")" +
                       " submit=" + browserStatus.lastPreparation.submitMs,
@@ -433,9 +437,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           return;
         }
         if (key === "insert") {
-          const mode = value.trim().toLowerCase();
-          if (mode !== "default" && mode !== "lexical") {
-            ctx.ui.notify("Insert mode must be 'default' or 'lexical'.", "warning");
+          const mode = parseComposerInsertMode(value);
+          if (!mode) {
+            ctx.ui.notify("Insert mode must be 'default' or 'editor'.", "warning");
             return;
           }
           applyRuntimeConfigPatch(config, { insertMode: mode });
@@ -470,7 +474,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("web-config", {
-    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | insert <default|lexical> | clear <key>",
+    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | insert <default|editor> | clear <key>",
     handler: async (args, ctx) => {
       try {
         const trimmed = args.trim();
@@ -534,7 +538,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
 
         if (!value) {
           ctx.ui.notify(
-            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | insert <default|lexical> | clear <key>",
+            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | insert <default|editor> | clear <key>",
             "warning",
           );
           return;
@@ -574,9 +578,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         }
 
         if (action === "insert") {
-          const mode = value.trim().toLowerCase();
-          if (mode !== "default" && mode !== "lexical") {
-            ctx.ui.notify("Insert mode must be 'default' or 'lexical'.", "warning");
+          const mode = parseComposerInsertMode(value);
+          if (!mode) {
+            ctx.ui.notify("Insert mode must be 'default' or 'editor'.", "warning");
             return;
           }
           applyRuntimeConfigPatch(config, { insertMode: mode });
@@ -683,6 +687,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
                     " mention=" + browserStatus.lastPreparation.mentionMs +
                     " insert=" + browserStatus.lastPreparation.insertMs +
                     " (mode=" + browserStatus.lastPreparation.insertMode +
+                    (browserStatus.lastPreparation.insertDetail
+                      ? " detail=" + browserStatus.lastPreparation.insertDetail
+                      : "") +
                     " edit=" + browserStatus.lastPreparation.insertEditMs +
                     " verify=" + browserStatus.lastPreparation.insertVerifyMs + ")" +
                     " submit=" + browserStatus.lastPreparation.submitMs,
