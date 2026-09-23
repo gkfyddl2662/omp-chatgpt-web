@@ -13,6 +13,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Large Lexical/contenteditable edits can spend roughly a millisecond per
+// character inside document.execCommand("insertText"). For large provider
+// prompts, suppress painting of the composer wrapper while that synchronous
+// edit runs. The DOM, focus, selection, and input events remain live; only
+// rendering of the wrapper subtree is skipped until the edit returns.
+const PAINT_SUPPRESS_INSERT_THRESHOLD_CHARS = 16_384;
+
 async function firstVisible(
   locators: Locator[],
   timeout = 500,
@@ -43,7 +50,7 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "execCommand" | "cdp";
+  insertMode: "execCommand" | "hidden-exec" | "cdp";
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -453,7 +460,7 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     let insertion: {
-      mode: "execCommand" | "cdp";
+      mode: "execCommand" | "hidden-exec" | "cdp";
       editMs: number;
       verifyMs: number;
     };
@@ -814,19 +821,26 @@ export class ChatGptBrowserBackend {
     composer: Locator,
     text: string,
   ): Promise<{
-    mode: "execCommand" | "cdp";
+    mode: "execCommand" | "hidden-exec" | "cdp";
     editMs: number;
     verifyMs: number;
   }> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
     const editStartedAt = Date.now();
+    const suppressPaint = text.length >= PAINT_SUPPRESS_INSERT_THRESHOLD_CHARS;
 
     // Backend-only inline insertion. No OS clipboard, no foreground-window
     // activation, and no synthetic paste events that ChatGPT may promote to
     // a "Pasted text" attachment.
-    const inserted = await composer.evaluate((element, value) => {
+    //
+    // For large prompts, keep the composer fully live but skip painting its
+    // wrapper while execCommand performs the synchronous edit. Focus/caret are
+    // established before content-visibility is changed. Inline styles are
+    // restored in finally so even a rejected edit cannot leave the UI hidden.
+    const inserted = await composer.evaluate((element, input) => {
       const el = element as HTMLElement;
+      const value = String(input.value);
       if (document.activeElement !== el) el.focus();
       if (document.activeElement !== el) return false;
 
@@ -853,10 +867,53 @@ export class ChatGptBrowserBackend {
         return false;
       }
 
-      return document.execCommand("insertText", false, String(value));
-    }, text).catch(() => false);
+      if (!input.suppressPaint) {
+        return document.execCommand("insertText", false, value);
+      }
 
-    let mode: "execCommand" | "cdp" = "execCommand";
+      const wrapper =
+        el.closest<HTMLElement>('form, [data-type="unified-composer"]') ?? el;
+      const style = wrapper.style;
+      const priorContentVisibility = style.getPropertyValue("content-visibility");
+      const priorContentVisibilityPriority = style.getPropertyPriority("content-visibility");
+      const priorIntrinsicSize = style.getPropertyValue("contain-intrinsic-size");
+      const priorIntrinsicSizePriority = style.getPropertyPriority("contain-intrinsic-size");
+      const rect = wrapper.getBoundingClientRect();
+
+      try {
+        // Preserve the wrapper's occupied box while telling Blink not to paint
+        // or lay out its subtree during the expensive contenteditable edit.
+        style.setProperty(
+          "contain-intrinsic-size",
+          Math.max(1, Math.ceil(rect.width)) + "px " +
+            Math.max(1, Math.ceil(rect.height)) + "px",
+        );
+        style.setProperty("content-visibility", "hidden");
+        return document.execCommand("insertText", false, value);
+      } finally {
+        if (priorContentVisibility) {
+          style.setProperty(
+            "content-visibility",
+            priorContentVisibility,
+            priorContentVisibilityPriority,
+          );
+        } else {
+          style.removeProperty("content-visibility");
+        }
+        if (priorIntrinsicSize) {
+          style.setProperty(
+            "contain-intrinsic-size",
+            priorIntrinsicSize,
+            priorIntrinsicSizePriority,
+          );
+        } else {
+          style.removeProperty("contain-intrinsic-size");
+        }
+      }
+    }, { value: text, suppressPaint }).catch(() => false);
+
+    let mode: "execCommand" | "hidden-exec" | "cdp" =
+      suppressPaint ? "hidden-exec" : "execCommand";
     if (!inserted) {
       await composer.focus();
       await page.keyboard.insertText(text);
