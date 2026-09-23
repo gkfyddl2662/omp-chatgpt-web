@@ -113,8 +113,8 @@ function pushError(stream: AssistantMessageEventStream, model: Model, error: unk
 
 function sessionKey(options?: SimpleStreamOptions): string {
   return (
-    options?.sessionId?.trim() ||
     options?.promptCacheKey?.trim() ||
+    options?.sessionId?.trim() ||
     "ephemeral_" + randomUUID().replace(/-/g, "")
   );
 }
