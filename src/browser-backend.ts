@@ -749,20 +749,36 @@ export class ChatGptBrowserBackend {
 
     const actual = await this.#composerPlainText(composer);
 
-    // ChatGPT may expand the attached app pill into extra accessibility/UI text
-    // inside the composer after ordinary text is inserted. That makes whole-
-    // composer equality a false positive even when the prompt itself is intact.
-    // Verify the inserted payload by content fingerprint and bounded growth
-    // instead. This still catches the earlier ~2x duplicate-insertion failure.
-    const fingerprintSize = Math.min(2_048, text.length);
-    const tailFingerprint = text.slice(-fingerprintSize);
-    const growth = actual.length - before.length;
-    const uiOverheadAllowance = 8_192;
-    const suspiciouslyShort = growth < Math.max(0, text.length - 256);
-    const suspiciouslyLong = growth > text.length + uiOverheadAllowance;
-    const missingTail = tailFingerprint.length > 0 && !actual.includes(tailFingerprint);
+    // ChatGPT/Lexical rewrites presentation whitespace (newlines, NBSPs and
+    // paragraph boundaries) even when the submitted text is semantically the
+    // same. Verify content after whitespace normalization, while keeping the
+    // actual prompt string completely unchanged.
+    const normalizeForVerification = (value: string): string =>
+      value
+        .replace(/\u00a0/g, " ")
+        .replace(/\r\n?/g, "\n")
+        .replace(/\s+/g, " ")
+        .trim();
 
-    if (suspiciouslyShort || suspiciouslyLong || missingTail) {
+    const normalizedPrompt = normalizeForVerification(text);
+    const normalizedActual = normalizeForVerification(actual);
+    const normalizedFingerprintSize = Math.min(
+      2_048,
+      normalizedPrompt.length,
+    );
+    const normalizedTail = normalizedPrompt.slice(
+      -normalizedFingerprintSize,
+    );
+
+    const growth = actual.length - before.length;
+    const minGrowth = Math.floor(text.length * 0.9);
+    const maxGrowth = Math.ceil(text.length * 1.2) + 8_192;
+    const suspiciousGrowth = growth < minGrowth || growth > maxGrowth;
+    const missingTail =
+      normalizedTail.length > 0 &&
+      !normalizedActual.includes(normalizedTail);
+
+    if (suspiciousGrowth || missingTail) {
       throw new Error(
         "ChatGPT composer prompt verification failed " +
           "(prompt " + text.length +
