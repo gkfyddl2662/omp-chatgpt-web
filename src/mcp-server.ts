@@ -198,7 +198,7 @@ export async function createMcpServer(options: {
           {
             name: "omp_turn_complete",
             description:
-              "Finish the current OMP model turn with the final assistant answer. Do not call while an OMP tool is still in flight.",
+              "Finish the current OMP model turn with the final assistant answer. Do not call while an OMP tool is still in flight. After this tool returns success, render exactly the same answer as normal ChatGPT assistant prose and do not call any more tools.",
             inputSchema: {
               type: "object",
               properties: {
@@ -270,8 +270,17 @@ export async function createMcpServer(options: {
         }
         options.broker.complete(token, input.answer);
         return rpcComplete(request, {
-          content: [{ type: "text", text: "OMP turn completed." }],
-          structuredContent: { completed: true },
+          content: [{
+            type: "text",
+            text:
+              "OMP turn completed. Now render exactly the same final answer you submitted " +
+              "as normal ChatGPT assistant prose. Do not add a preface, do not summarize it " +
+              "again, and do not call any more tools.",
+          }],
+          structuredContent: {
+            completed: true,
+            render_final_answer_in_chat: true,
+          },
         }, { httpProtocolVersion });
       }
 
