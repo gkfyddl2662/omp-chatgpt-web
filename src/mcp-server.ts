@@ -22,6 +22,55 @@ function rpcError(id: JsonRpcRequest["id"], code: number, message: string) {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
 
+function requestProtocolVersion(
+  request: JsonRpcRequest,
+  httpProtocolVersion?: string,
+): string | undefined {
+  const meta = request.params?._meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    const version = (meta as Record<string, unknown>)["io.modelcontextprotocol/protocolVersion"];
+    if (typeof version === "string" && version) return version;
+  }
+  return httpProtocolVersion;
+}
+
+function completeResult(
+  request: JsonRpcRequest,
+  result: Record<string, unknown>,
+  options: { cacheable?: boolean; httpProtocolVersion?: string } = {},
+): Record<string, unknown> {
+  const version = request.method === "server/discover"
+    ? MODERN_PROTOCOL_VERSION
+    : requestProtocolVersion(request, options.httpProtocolVersion);
+  if (version !== MODERN_PROTOCOL_VERSION) return result;
+
+  const existingMeta =
+    result._meta && typeof result._meta === "object" && !Array.isArray(result._meta)
+      ? result._meta as Record<string, unknown>
+      : {};
+
+  return {
+    resultType: "complete",
+    ...result,
+    ...(options.cacheable ? { ttlMs: 0, cacheScope: "private" } : {}),
+    _meta: {
+      ...existingMeta,
+      "io.modelcontextprotocol/serverInfo": {
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+      },
+    },
+  };
+}
+
+function rpcComplete(
+  request: JsonRpcRequest,
+  result: Record<string, unknown>,
+  options: { cacheable?: boolean; httpProtocolVersion?: string } = {},
+) {
+  return rpcResult(request.id, completeResult(request, result, options));
+}
+
 function sendJson(response: ServerResponse, status: number, payload: unknown, headers: Record<string,string> = {}) {
   const body = JSON.stringify(payload);
   response.writeHead(status, {
@@ -55,32 +104,33 @@ export async function createMcpServer(options: {
   port: number;
   broker: TurnBroker;
 }): Promise<McpServerHandle> {
-  const execute = async (request: JsonRpcRequest, signal: AbortSignal): Promise<unknown | undefined> => {
+  const execute = async (
+    request: JsonRpcRequest,
+    signal: AbortSignal,
+    httpProtocolVersion?: string,
+  ): Promise<unknown | undefined> => {
     const method = request.method;
     if (!method) return rpcError(request.id, -32600, "Invalid Request");
 
     if (method === "notifications/initialized") return undefined;
-    if (method === "ping") return rpcResult(request.id, {});
+    if (method === "ping") {
+      return rpcComplete(request, {}, { httpProtocolVersion });
+    }
 
     if (method === "server/discover") {
-      return rpcResult(request.id, {
-        resultType: "complete",
-        supportedVersions: [MODERN_PROTOCOL_VERSION],
-        capabilities: { tools: {} },
-        _meta: {
-          "io.modelcontextprotocol/serverInfo": {
-            name: SERVER_NAME,
-            version: SERVER_VERSION,
-          },
+      return rpcComplete(
+        request,
+        {
+          supportedVersions: [MODERN_PROTOCOL_VERSION],
+          capabilities: { tools: {} },
+          instructions:
+            "This MCP server bridges ChatGPT to the live Oh My Pi tool surface. " +
+            "Use omp_tool_inventory to inspect the exact current OMP tools, " +
+            "omp_tool_call to request one native OMP tool, and omp_turn_complete " +
+            "to finish the current OMP model turn.",
         },
-        instructions:
-          "This MCP server bridges ChatGPT to the live Oh My Pi tool surface. " +
-          "Use omp_tool_inventory to inspect the exact current OMP tools, " +
-          "omp_tool_call to request one native OMP tool, and omp_turn_complete " +
-          "to finish the current OMP model turn.",
-        ttlMs: 60_000,
-        cacheScope: "private",
-      });
+        { cacheable: true, httpProtocolVersion },
+      );
     }
 
     if (method === "initialize") {
@@ -95,7 +145,7 @@ export async function createMcpServer(options: {
     }
 
     if (method === "tools/list") {
-      return rpcResult(request.id, {
+      return rpcComplete(request, {
         tools: [
           {
             name: "omp_tool_inventory",
@@ -144,7 +194,7 @@ export async function createMcpServer(options: {
             },
           },
         ],
-      });
+      }, { cacheable: true, httpProtocolVersion });
     }
 
     if (method === "tools/call") {
@@ -166,10 +216,10 @@ export async function createMcpServer(options: {
           limit: typeof input.limit === "number" ? input.limit : undefined,
           includeSchema: typeof input.include_schema === "boolean" ? input.include_schema : undefined,
         });
-        return rpcResult(request.id, {
+        return rpcComplete(request, {
           content: [{ type: "text", text: JSON.stringify(page) }],
           structuredContent: page,
-        });
+        }, { httpProtocolVersion });
       }
 
       if (name === "omp_tool_call") {
@@ -183,18 +233,18 @@ export async function createMcpServer(options: {
             : {};
         try {
           const receipt = await options.broker.requestTool(token, toolName, toolArgs, signal);
-          return rpcResult(request.id, {
+          return rpcComplete(request, {
             content: [{ type: "text", text: JSON.stringify(receipt) }],
             structuredContent: receipt,
             ...(receipt.is_error ? { isError: true } : {}),
-          });
+          }, { httpProtocolVersion });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          return rpcResult(request.id, {
+          return rpcComplete(request, {
             content: [{ type: "text", text: message }],
             structuredContent: { error: message },
             isError: true,
-          });
+          }, { httpProtocolVersion });
         }
       }
 
@@ -203,10 +253,10 @@ export async function createMcpServer(options: {
           return rpcError(request.id, -32602, "omp_turn_complete requires answer");
         }
         options.broker.complete(token, input.answer);
-        return rpcResult(request.id, {
+        return rpcComplete(request, {
           content: [{ type: "text", text: "OMP turn completed." }],
           structuredContent: { completed: true },
-        });
+        }, { httpProtocolVersion });
       }
 
       return rpcError(request.id, -32601, "Unknown MCP tool: " + name);
@@ -240,7 +290,15 @@ export async function createMcpServer(options: {
           outputs.push(rpcError(null, -32600, "Invalid Request"));
           continue;
         }
-        const output = await execute(raw as JsonRpcRequest, controller.signal);
+        const protocolHeader = request.headers["mcp-protocol-version"];
+        const httpProtocolVersion = Array.isArray(protocolHeader)
+          ? protocolHeader[0]
+          : protocolHeader;
+        const output = await execute(
+          raw as JsonRpcRequest,
+          controller.signal,
+          httpProtocolVersion,
+        );
         if (output !== undefined) outputs.push(output);
       }
       if (outputs.length === 0) {
