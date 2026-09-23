@@ -277,12 +277,19 @@ so the browser never has to close its last tab and relaunch between epochs.
 Retained compaction uses the same direct composer insertion strategy as
 ordinary turns (ProseMirror -> Lexical -> execCommand -> CDP).
 
-Compaction is **fail-closed**. If the retained ChatGPT conversation is missing,
-unseeded, closed, or returns ChatGPT's error/retry UI, the provider returns an
-error to OMP and refuses to replay the full OMP history into a fresh browser
-tab. OMP therefore keeps the pre-compaction history instead of committing a
-false summary. The provider also rejects error text, maintenance-prompt echoes,
-and large source-prompt replays before a compaction summary can be accepted.
+Compaction prefers the retained ChatGPT conversation when it is still
+available. If that thread was lost or invalidated (for example after an ordinary
+Web turn hit ChatGPT's timeout/retry UI), the provider uses OMP's self-contained
+compaction side request in a **fresh Temporary Chat** instead. That fresh request
+contains the compaction system instructions and source conversation OMP already
+prepared; it does not attach OMP Local, execute tools, or replay the ordinary
+agent turn.
+
+Both retained and fresh compaction remain fail-closed around the returned
+summary: browser/server error text, maintenance-prompt echoes, and large source
+prompt replays are rejected before OMP can commit the destructive history
+rewrite. After either path succeeds, a clean replacement Temporary Chat is
+prepared so the next ordinary turn seeds OMP's compacted context from scratch.
 
 New ordinary turns are serialized behind the compaction boundary so they cannot
 race the summary/reset handoff.
@@ -396,9 +403,9 @@ silently submitting the agent prompt without the connector.
 
 - ChatGPT Web automation depends on current composer and Apps UI structure.
 - If ChatGPT's direct editor internals cannot be discovered safely, ordinary
-  insertion falls back to the older contenteditable/CDP paths. Compaction does
-  not fall back to a fresh full-history replay when its retained thread is
-  unavailable.
+  insertion falls back to the older contenteditable/CDP paths. A missing
+  retained thread may use a fresh **maintenance-only** compaction request, but
+  ordinary agent turns are never replayed into a fresh tab automatically.
 - Provider token usage is reported as zero because normal ChatGPT Web does not
   expose authoritative request token accounting through this browser path.
 - Only one native OMP tool call is allowed in flight per Web response; multiple
