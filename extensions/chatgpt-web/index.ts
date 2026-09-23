@@ -11,6 +11,7 @@ import { createMcpServer, type McpServerHandle } from "../../src/mcp-server.js";
 import { WebModelProvider } from "../../src/provider.js";
 import { TurnBroker } from "../../src/turn-broker.js";
 import { TunnelSupervisor } from "../../src/tunnel.js";
+import { getWebArgumentCompletions, parseWebCommand, WEB_HELP_TEXT } from "../../src/web-command.js";
 
 const PROVIDER = "chatgpt-web";
 const MODEL = "web";
@@ -161,6 +162,232 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
       maxTokens: 32_000,
       preferWebsockets: false,
     }],
+  });
+
+  pi.registerCommand("web", {
+    description: "ChatGPT Web: start | use | open | status | tunnel | config | set | unset | help",
+    getArgumentCompletions: getWebArgumentCompletions,
+    handler: async (args, ctx) => {
+      try {
+        const command = parseWebCommand(args);
+
+        const showConfig = () => {
+          const maskedApi = config.tunnelApiKey
+            ? config.tunnelApiKey.slice(0, Math.min(5, config.tunnelApiKey.length)) + "..." +
+              config.tunnelApiKey.slice(-4)
+            : "(not set)";
+          ctx.ui.notify(
+            [
+              "OMP ChatGPT Web config",
+              "file: " + persistentConfigPath(),
+              "tunnel: " + (config.tunnelId || "(not set)"),
+              "api: " + maskedApi,
+              "connector: " + config.connectorName,
+              "browser: " + (config.browserExecutable || "(auto)"),
+              "tunnel-client: " + config.tunnelClientBin,
+              "cdp: " + config.browserCdpPort,
+            ].join("\n"),
+            "info",
+          );
+        };
+
+        const useWebModel = async () => {
+          const model = ctx.models.resolve(PROVIDER + "/" + MODEL);
+          if (!model) {
+            ctx.ui.notify("chatgpt-web/web is not available in the current model registry.", "error");
+            return false;
+          }
+          const changed = await pi.setModel(model);
+          ctx.ui.notify(
+            changed
+              ? "OMP model backend -> chatgpt-web/web"
+              : "Could not switch the OMP model to chatgpt-web/web.",
+            changed ? "info" : "error",
+          );
+          return changed;
+        };
+
+        const showStatus = async () => {
+          const server = await ensureSharedMcp();
+          const browserStatus = await browser.status(config);
+          const tunnelStatus = tunnel.status(config);
+          ctx.ui.notify(
+            [
+              "OMP ChatGPT Web provider",
+              "model: " + PROVIDER + "/" + MODEL,
+              "inference: chatgpt.com browser only",
+              "MCP: " + server.url,
+              "connector: " + config.connectorName,
+              "tunnel: " + (tunnelStatus.running
+                ? tunnelStatus.ready ? "ready" : "running/not-ready"
+                : tunnelStatus.configured
+                  ? "configured/stopped"
+                  : "externally managed or unconfigured"),
+              "browser: " + (browserStatus.open ? "open" : "closed"),
+              "automation: " + (browserStatus.attached ? "attached over CDP" : "not attached"),
+              "tabs: " + browserStatus.tabs,
+              "retained sessions: " + browserStatus.retainedSessions,
+              "active Web turns: " + browserStatus.activeTurns,
+              "pending compactions: " + browserStatus.pendingCompactions,
+              "shared Web sessions: " + sharedBindingCount,
+              ...(browserStatus.lastPreparation
+                ? [
+                    "last prompt chars: " + browserStatus.lastPreparation.promptChars,
+                    "prep ms: session=" + browserStatus.lastPreparation.sessionMs +
+                      " mention=" + browserStatus.lastPreparation.mentionMs +
+                      " insert=" + browserStatus.lastPreparation.insertMs +
+                      " (mode=" + browserStatus.lastPreparation.insertMode +
+                      " edit=" + browserStatus.lastPreparation.insertEditMs +
+                      " verify=" + browserStatus.lastPreparation.insertVerifyMs + ")" +
+                      " submit=" + browserStatus.lastPreparation.submitMs,
+                  ]
+                : []),
+            ].join("\n"),
+            "info",
+          );
+        };
+
+        const manageTunnel = async (action: "start" | "stop" | "restart" | "status") => {
+          const server = await ensureSharedMcp();
+          if (action === "stop") {
+            await tunnel.stop(config);
+            ctx.ui.notify("Secure MCP Tunnel stopped", "info");
+            return;
+          }
+          if (action === "restart") {
+            await tunnel.stop(config);
+            const status = await startSharedTunnel();
+            ctx.ui.notify(
+              "Secure MCP Tunnel restarted" +
+                (status.pid ? " pid=" + status.pid : "") +
+                (status.healthUrl ? "\nhealth: " + status.healthUrl : ""),
+              "info",
+            );
+            return;
+          }
+          if (action === "start") {
+            const status = await startSharedTunnel();
+            ctx.ui.notify(
+              "Secure MCP Tunnel ready" +
+                (status.pid ? " pid=" + status.pid : "") +
+                (status.healthUrl ? "\nhealth: " + status.healthUrl : ""),
+              "info",
+            );
+            return;
+          }
+          const diagnostics = await tunnel.diagnostics(config);
+          ctx.ui.notify(
+            JSON.stringify(
+              {
+                ...diagnostics,
+                mcp: server.url,
+                mcpTrace: server.trace(),
+              },
+              null,
+              2,
+            ),
+            diagnostics.ready ? "info" : "warning",
+          );
+        };
+
+        if (command.kind === "help") {
+          ctx.ui.notify(WEB_HELP_TEXT, "info");
+          return;
+        }
+        if (command.kind === "invalid") {
+          ctx.ui.notify(command.message, "warning");
+          return;
+        }
+        if (command.kind === "start") {
+          await ensureSharedTransport();
+          await useWebModel();
+          return;
+        }
+        if (command.kind === "use") {
+          await useWebModel();
+          return;
+        }
+        if (command.kind === "open") {
+          await browser.openLogin(config);
+          ctx.ui.notify(
+            "Browser profile opened. Sign in to ChatGPT and verify the connector, then close that browser window before using the Web provider.",
+            "info",
+          );
+          return;
+        }
+        if (command.kind === "status") {
+          await showStatus();
+          return;
+        }
+        if (command.kind === "config") {
+          showConfig();
+          return;
+        }
+        if (command.kind === "tunnel") {
+          await manageTunnel(command.action);
+          return;
+        }
+        if (command.kind === "unset") {
+          const key = command.key;
+          if (key === "api") {
+            applyRuntimeConfigPatch(config, { tunnelApiKey: "" });
+          } else if (key === "tunnel") {
+            applyRuntimeConfigPatch(config, { tunnelId: "" });
+          } else if (key === "connector") {
+            applyRuntimeConfigPatch(config, { connectorName: "" });
+          } else if (key === "browser") {
+            applyRuntimeConfigPatch(config, { browserExecutable: "" });
+          } else {
+            applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
+          }
+          if (key === "api" || key === "tunnel" || key === "tunnel-bin") {
+            await tunnel.stop(config).catch(() => undefined);
+          }
+          ctx.ui.notify("Cleared web config: " + key, "info");
+          return;
+        }
+
+        const { key, value } = command;
+        if (key === "tunnel") {
+          applyRuntimeConfigPatch(config, { tunnelId: value });
+          await tunnel.stop(config).catch(() => undefined);
+          ctx.ui.notify("Saved Secure MCP Tunnel ID.", "info");
+          return;
+        }
+        if (key === "api") {
+          applyRuntimeConfigPatch(config, { tunnelApiKey: value });
+          await tunnel.stop(config).catch(() => undefined);
+          ctx.ui.notify("Saved Secure MCP Tunnel runtime API key.", "info");
+          return;
+        }
+        if (key === "tunnel-bin") {
+          applyRuntimeConfigPatch(config, { tunnelClientBin: value });
+          await tunnel.stop(config).catch(() => undefined);
+          ctx.ui.notify("Saved tunnel-client executable: " + value, "info");
+          return;
+        }
+        if (key === "connector") {
+          applyRuntimeConfigPatch(config, { connectorName: value });
+          ctx.ui.notify('Saved ChatGPT connector name: "' + value + '"', "info");
+          return;
+        }
+        if (key === "browser") {
+          applyRuntimeConfigPatch(config, { browserExecutable: value });
+          ctx.ui.notify("Saved browser executable path.", "info");
+          return;
+        }
+
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          ctx.ui.notify("CDP port must be an integer from 1 to 65535.", "warning");
+          return;
+        }
+        applyRuntimeConfigPatch(config, { browserCdpPort: port });
+        ctx.ui.notify("Saved Chrome CDP port: " + port, "info");
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
   });
 
   pi.registerCommand("web-config", {
