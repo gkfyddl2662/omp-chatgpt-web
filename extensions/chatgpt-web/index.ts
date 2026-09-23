@@ -238,6 +238,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
                 : "externally managed or unconfigured"),
             "browser: " + (browserStatus.open ? "open" : "closed"),
             "automation: " + (browserStatus.attached ? "attached over CDP" : "not attached"),
+            "tabs: " + browserStatus.tabs,
             "active Web turns: " + browserStatus.activeTurns,
           ].join("\n"),
           "info",
