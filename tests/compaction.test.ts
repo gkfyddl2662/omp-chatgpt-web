@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Context } from "@oh-my-pi/pi-ai";
 import {
   compileCompactionPrompt,
+  compileRetainedCompactionPrompt,
   isOmpCompactionContext,
   OMP_SUMMARIZATION_SYSTEM_MARKER,
 } from "../src/compaction.js";
@@ -77,4 +78,15 @@ test("compaction prompt explicitly forbids tools and preserves source text", () 
   assert.match(prompt, /Do not use apps, tools, web search, files, MCP, or code execution/);
   assert.match(prompt, /exact\/path\.ts failed with E42/);
   assert.match(prompt, /Return only the requested summary text/);
+});
+
+
+test("retained compaction uses the existing ChatGPT thread instead of replaying full history", () => {
+  const source = "<conversation>very large retained history with exact/path.ts</conversation>\n\n" +
+    "You MUST summarize the conversation above into a structured handoff summary for another LLM to resume the task.";
+  const prompt = compileRetainedCompactionPrompt(context(source));
+  assert.match(prompt, /SAME ChatGPT conversation/);
+  assert.match(prompt, /conversation history already present/);
+  assert.doesNotMatch(prompt, /very large retained history/);
+  assert.match(prompt, /Summarize that retained conversation/);
 });
