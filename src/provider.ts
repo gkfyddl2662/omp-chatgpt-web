@@ -111,6 +111,52 @@ function pushError(stream: AssistantMessageEventStream, model: Model, error: unk
   stream.push({ type: "error", reason: "error", error: assistant });
 }
 
+const OMP_TITLE_SYSTEM_MARKER =
+  "Write a ~5 word title using only the task described in the next user message.";
+
+function messageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map(part => {
+      if (!part || typeof part !== "object") return "";
+      return Reflect.get(part, "type") === "text"
+        ? String(Reflect.get(part, "text") ?? "")
+        : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function isOmpTitleContext(context: Context): boolean {
+  return (context.systemPrompt ?? []).some(prompt =>
+    prompt.includes(OMP_TITLE_SYSTEM_MARKER)
+  );
+}
+
+function localOmpTitle(context: Context): string {
+  const source = context.messages
+    .filter(message => message.role === "user")
+    .map(message => messageText(message.content))
+    .join(" ")
+    .replace(/<\/?user>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!source) return "<title/>";
+
+  const title = source
+    .split(/\s+/)
+    .slice(0, 5)
+    .join(" ")
+    .replace(/[.!?。！？]+$/g, "")
+    .slice(0, 96)
+    .trim();
+
+  return title ? "<title>" + title + "</title>" : "<title/>";
+}
+
 function sessionKey(options?: SimpleStreamOptions): string {
   return (
     options?.promptCacheKey?.trim() ||
@@ -174,6 +220,14 @@ export class WebModelProvider {
 
     try {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Provider request aborted", "AbortError");
+
+      // OMP title generation is a background UI utility request, not an agent
+      // model turn. Never let it acquire the retained ChatGPT conversation or
+      // attach OMP Local; doing so can race the real foreground turn.
+      if (isOmpTitleContext(context)) {
+        pushText(stream, model, localOmpTitle(context));
+        return;
+      }
 
       if (isOmpCompactionContext(context, options)) {
         try {
