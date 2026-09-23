@@ -139,20 +139,20 @@ export function loadRuntimeConfig(): RuntimeConfig {
   return {
     mcpHost: "127.0.0.1",
     mcpPort: port,
-    connectorName: process.env.OMP_CHATGPT_WEB_CONNECTOR?.trim() || persisted.connectorName || "OMP Local",
+    connectorName: persisted.connectorName || process.env.OMP_CHATGPT_WEB_CONNECTOR?.trim() || "OMP Local",
     chatUrl: process.env.OMP_CHATGPT_WEB_URL?.trim() || "https://chatgpt.com/?temporary-chat=true",
     browserProfileDir:
       process.env.OMP_CHATGPT_WEB_PROFILE?.trim() || join(homedir(), ".omp", "chatgpt-web", "chrome"),
-    browserExecutable: process.env.OMP_CHATGPT_WEB_BROWSER?.trim() || persisted.browserExecutable || defaultBrowserExecutable(),
+    browserExecutable: persisted.browserExecutable || process.env.OMP_CHATGPT_WEB_BROWSER?.trim() || defaultBrowserExecutable(),
     browserCdpPort: Math.floor(
-      envNumber("OMP_CHATGPT_WEB_CDP_PORT", persisted.browserCdpPort ?? 9222),
+      persisted.browserCdpPort ?? envNumber("OMP_CHATGPT_WEB_CDP_PORT", 9222),
     ),
     headed: envBoolean("OMP_CHATGPT_WEB_HEADED", true),
     autoApproveToolCalls: envBoolean("OMP_CHATGPT_WEB_AUTO_APPROVE", false),
     turnTimeoutMs: Math.floor(envNumber("OMP_CHATGPT_WEB_TURN_TIMEOUT_MS", 15 * 60_000)),
     tunnelClientBin: process.env.TUNNEL_CLIENT_BIN?.trim() || "tunnel-client",
-    tunnelId: process.env.CONTROL_PLANE_TUNNEL_ID?.trim() || persisted.tunnelId || undefined,
-    tunnelApiKey: process.env.CONTROL_PLANE_API_KEY?.trim() || persisted.tunnelApiKey || undefined,
+    tunnelId: persisted.tunnelId || process.env.CONTROL_PLANE_TUNNEL_ID?.trim() || undefined,
+    tunnelApiKey: persisted.tunnelApiKey || process.env.CONTROL_PLANE_API_KEY?.trim() || undefined,
   };
 }
 
