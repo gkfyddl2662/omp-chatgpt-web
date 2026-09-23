@@ -111,8 +111,15 @@ Then in OMP:
 /web-open
 ```
 
-Sign in to ChatGPT in the browser window opened by `/web-open` and confirm the
-connector is visible.
+`/web-open` launches ordinary Chrome with a dedicated OMP profile and a local
+DevTools port. It deliberately does **not** attach Playwright during sign-in.
+Sign in to ChatGPT first. The provider attaches over CDP only when an actual
+`chatgpt-web/web` model turn begins. This avoids Playwright's normal launch
+flags (including `--no-sandbox`) on the login browser.
+
+Chrome 136+ requires remote debugging to use a non-default `--user-data-dir`;
+the extension already uses `~/.omp/chatgpt-web/chrome` for that isolated
+profile.
 
 ## Select the Web model backend
 
@@ -180,7 +187,7 @@ goal for this provider.
 
 | Command | Purpose |
 | --- | --- |
-| `/web-open` | Open the persistent ChatGPT browser profile |
+| `/web-open` | Open ordinary Chrome for manual sign-in; automation attaches later over CDP |
 | `/web-use` | Switch this OMP session to `chatgpt-web/web` |
 | `/web-status` | Show provider/browser/MCP/tunnel status |
 | `/web-tunnel start\|stop\|status` | Manage Secure MCP Tunnel |
