@@ -3,7 +3,7 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_WEB_SUBAGENT_LIMIT, normalizeWebSubagentLimit } from "./subagent-limit.js";
 
-export type ComposerInsertMode = "default" | "lexical";
+export type ComposerInsertMode = "default" | "editor";
 
 export interface PersistedRuntimeConfig {
   connectorName?: string;
@@ -46,10 +46,24 @@ function envNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+export function parseComposerInsertMode(
+  value: unknown,
+): ComposerInsertMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "default") return "default";
+  if (
+    normalized === "editor" ||
+    normalized === "prosemirror" ||
+    normalized === "lexical"
+  ) {
+    return "editor";
+  }
+  return undefined;
+}
+
 export function normalizeComposerInsertMode(value: unknown): ComposerInsertMode {
-  return typeof value === "string" && value.trim().toLowerCase() === "lexical"
-    ? "lexical"
-    : "default";
+  return parseComposerInsertMode(value) ?? "default";
 }
 
 function envInsertMode(): ComposerInsertMode {
