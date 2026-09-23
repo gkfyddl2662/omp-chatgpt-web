@@ -5,12 +5,18 @@ import {
   applyRuntimeConfigPatch,
   loadRuntimeConfig,
   persistentConfigPath,
+  resetSubagentLimit,
   tunnelConfigured,
 } from "../../src/config.js";
 import { createMcpServer, type McpServerHandle } from "../../src/mcp-server.js";
 import { WebModelProvider } from "../../src/provider.js";
 import { TurnBroker } from "../../src/turn-broker.js";
 import { TunnelSupervisor } from "../../src/tunnel.js";
+import {
+  resolveSubagentRootKey,
+  WebSubagentLimiter,
+  type SubagentLimitStatus,
+} from "../../src/subagent-limit.js";
 import { getWebArgumentCompletions, parseWebCommand, WEB_HELP_TEXT } from "../../src/web-command.js";
 
 const PROVIDER = "chatgpt-web";
@@ -23,6 +29,30 @@ const sharedBroker = new TurnBroker({ schemaForTool: toolWireSchema });
 const sharedBrowser = new ChatGptBrowserBackend();
 const sharedTunnel = new TunnelSupervisor();
 const sharedConversationOwners = new Map<string, number>();
+const sharedSubagentLimiter = new WebSubagentLimiter();
+
+type SubagentContext = {
+  sessionManager: {
+    getSessionId(): string;
+    getSessionFile(): string | undefined;
+    getHeader(): { parentSession?: string } | null;
+  };
+};
+
+function subagentRootKey(ctx: SubagentContext): string {
+  const header = ctx.sessionManager.getHeader();
+  return resolveSubagentRootKey({
+    sessionId: ctx.sessionManager.getSessionId(),
+    sessionFile: ctx.sessionManager.getSessionFile(),
+    parentSession: header?.parentSession,
+  });
+}
+
+function formatSubagentLimit(status: SubagentLimitStatus): string {
+  return status.unlimited
+    ? "unlimited (used " + status.used + ")"
+    : status.used + "/" + status.limit + " used";
+}
 
 let sharedMcp: McpServerHandle | undefined;
 let sharedMcpStarting: Promise<McpServerHandle> | undefined;
@@ -114,6 +144,7 @@ async function closeSharedRuntimeIfUnused(): Promise<void> {
     ]);
     sharedMcp = undefined;
     sharedConversationOwners.clear();
+    sharedSubagentLimiter.clearAll();
   })().finally(() => {
     sharedClosePromise = undefined;
   });
@@ -130,6 +161,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
   const ownedRequests = new Set<string>();
   let bindingStarted = false;
   let bindingReleased = false;
+  let bindingRootKey: string | undefined;
 
   pi.registerProvider(PROVIDER, {
     baseUrl: "http://127.0.0.1/omp-chatgpt-web",
@@ -186,6 +218,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "browser: " + (config.browserExecutable || "(auto)"),
               "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
+              "subagents: " + (config.subagentLimit < 0 ? "unlimited" : config.subagentLimit),
             ].join("\n"),
             "info",
           );
@@ -211,6 +244,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           const server = await ensureSharedMcp();
           const browserStatus = await browser.status(config);
           const tunnelStatus = tunnel.status(config);
+          const subagentStatus = sharedSubagentLimiter.status(subagentRootKey(ctx), config.subagentLimit);
           ctx.ui.notify(
             [
               "OMP ChatGPT Web provider",
@@ -230,6 +264,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "active Web turns: " + browserStatus.activeTurns,
               "pending compactions: " + browserStatus.pendingCompactions,
               "shared Web sessions: " + sharedBindingCount,
+              "subagents: " + formatSubagentLimit(subagentStatus),
               ...(browserStatus.lastPreparation
                 ? [
                     "last prompt chars: " + browserStatus.lastPreparation.promptChars,
@@ -323,6 +358,20 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           showConfig();
           return;
         }
+        if (command.kind === "limit") {
+          if (command.value === "default") {
+            resetSubagentLimit(config);
+          } else if (typeof command.value === "number") {
+            applyRuntimeConfigPatch(config, { subagentLimit: command.value });
+          }
+          const status = sharedSubagentLimiter.status(subagentRootKey(ctx), config.subagentLimit);
+          ctx.ui.notify(
+            "Web subagent limit: " + formatSubagentLimit(status) +
+              (command.value === undefined ? "" : "\nSaved for future OMP sessions."),
+            "info",
+          );
+          return;
+        }
         if (command.kind === "tunnel") {
           await manageTunnel(command.action);
           return;
@@ -337,6 +386,8 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { connectorName: "" });
           } else if (key === "browser") {
             applyRuntimeConfigPatch(config, { browserExecutable: "" });
+          } else if (key === "subagents") {
+            resetSubagentLimit(config);
           } else {
             applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
           }
@@ -376,6 +427,19 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           ctx.ui.notify("Saved browser executable path.", "info");
           return;
         }
+        if (key === "subagents") {
+          const limit = value.toLowerCase() === "off" ? -1 : Number(value);
+          if (!Number.isSafeInteger(limit) || limit < -1) {
+            ctx.ui.notify("Subagent limit must be a non-negative integer or 'off'.", "warning");
+            return;
+          }
+          applyRuntimeConfigPatch(config, { subagentLimit: limit });
+          ctx.ui.notify(
+            "Saved Web subagent limit: " + (limit < 0 ? "unlimited" : limit),
+            "info",
+          );
+          return;
+        }
 
         const port = Number(value);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -391,7 +455,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("web-config", {
-    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | clear <key>",
+    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | clear <key>",
     handler: async (args, ctx) => {
       try {
         const trimmed = args.trim();
@@ -414,6 +478,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "browser: " + (config.browserExecutable || "(auto)"),
               "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
+              "subagents: " + (config.subagentLimit < 0 ? "unlimited" : config.subagentLimit),
             ].join("\n"),
             "info",
           );
@@ -436,8 +501,10 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { browserExecutable: "" });
           } else if (key === "tunnel-bin") {
             applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
+          } else if (key === "subagents") {
+            resetSubagentLimit(config);
           } else {
-            ctx.ui.notify("Usage: /web-config clear api|tunnel|tunnel-bin|connector|browser", "warning");
+            ctx.ui.notify("Usage: /web-config clear api|tunnel|tunnel-bin|connector|browser|subagents", "warning");
             return;
           }
           if (key === "api" || key === "tunnel") {
@@ -449,7 +516,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
 
         if (!value) {
           ctx.ui.notify(
-            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | clear <key>",
+            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | clear <key>",
             "warning",
           );
           return;
@@ -488,6 +555,17 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           return;
         }
 
+        if (action === "subagents") {
+          const limit = value.toLowerCase() === "off" ? -1 : Number(value);
+          if (!Number.isSafeInteger(limit) || limit < -1) {
+            ctx.ui.notify("Subagent limit must be a non-negative integer or 'off'.", "warning");
+            return;
+          }
+          applyRuntimeConfigPatch(config, { subagentLimit: limit });
+          ctx.ui.notify("Saved Web subagent limit: " + (limit < 0 ? "unlimited" : limit), "info");
+          return;
+        }
+
         if (action === "cdp") {
           const port = Number(value);
           if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -500,7 +578,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         }
 
         ctx.ui.notify(
-          "Unknown web-config key. Use: show | tunnel | api | tunnel-bin | connector | browser | cdp | clear",
+          "Unknown web-config key. Use: show | tunnel | api | tunnel-bin | connector | browser | cdp | subagents | clear",
           "warning",
         );
       } catch (error) {
@@ -637,11 +715,23 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     const current = ctx.models.current() ?? ctx.model;
     if (current?.provider !== PROVIDER || current.id !== MODEL) return;
 
+    const rootKey = bindingRootKey ?? subagentRootKey(ctx);
+    const decision = sharedSubagentLimiter.trySpawn(rootKey, event.spawnKey, config.subagentLimit);
+    if (!decision.allowed) {
+      return {
+        block: true,
+        reason:
+          "ChatGPT Web subagent hard limit reached (" + decision.used + "/" + decision.limit + "). " +
+          "Use /web limit <N> to raise it, /web limit 0 to block all, or /web limit off for unlimited.",
+      };
+    }
+
     return {
       model: PROVIDER + "/" + MODEL,
       note:
         "OMP ChatGPT Web routes this subagent through the same shared Web runtime " +
-        "with an independent ChatGPT Temporary Chat tab.",
+        "with an independent ChatGPT Temporary Chat tab. Subagent budget: " +
+        formatSubagentLimit(decision) + ".",
     };
   });
 
@@ -649,6 +739,8 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     if (!bindingStarted) {
       bindingStarted = true;
       sharedBindingCount += 1;
+      bindingRootKey = subagentRootKey(ctx);
+      sharedSubagentLimiter.retain(bindingRootKey);
     }
     if (ctx.hasUI) {
       ctx.ui.setStatus(
@@ -672,6 +764,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
 
     if (bindingStarted) {
       sharedBindingCount = Math.max(0, sharedBindingCount - 1);
+      if (bindingRootKey) sharedSubagentLimiter.release(bindingRootKey);
     }
     await closeSharedRuntimeIfUnused();
   });

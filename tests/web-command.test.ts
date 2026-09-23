@@ -16,6 +16,10 @@ test("short Web commands parse to explicit actions", () => {
   assert.deepEqual(parseWebCommand("open"), { kind: "open" });
   assert.deepEqual(parseWebCommand("status"), { kind: "status" });
   assert.deepEqual(parseWebCommand("config"), { kind: "config" });
+  assert.deepEqual(parseWebCommand("limit"), { kind: "limit" });
+  assert.deepEqual(parseWebCommand("limit 3"), { kind: "limit", value: 3 });
+  assert.deepEqual(parseWebCommand("limit off"), { kind: "limit", value: -1 });
+  assert.deepEqual(parseWebCommand("limit default"), { kind: "limit", value: "default" });
 });
 
 test("/web tunnel defaults to idempotent start and supports lifecycle actions", () => {
@@ -47,6 +51,10 @@ test("invalid subcommands fail with actionable usage", () => {
   assert.equal(badTunnel.kind, "invalid");
   if (badTunnel.kind === "invalid") assert.match(badTunnel.message, /tunnel/);
 
+  const badLimit = parseWebCommand("limit nope");
+  assert.equal(badLimit.kind, "invalid");
+  if (badLimit.kind === "invalid") assert.match(badLimit.message, /\/web limit/);
+
   const badSet = parseWebCommand("set connector");
   assert.equal(badSet.kind, "invalid");
   if (badSet.kind === "invalid") assert.match(badSet.message, /\/web set/);
@@ -56,6 +64,10 @@ test("argument completion covers root, tunnel, set, and unset commands", () => {
   assert.deepEqual(
     getWebArgumentCompletions("st")?.map(item => item.label),
     ["start", "status"],
+  );
+  assert.deepEqual(
+    getWebArgumentCompletions("limit o")?.map(item => item.label),
+    ["off"],
   );
   assert.deepEqual(
     getWebArgumentCompletions("tunnel r")?.map(item => item.label),

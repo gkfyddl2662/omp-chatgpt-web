@@ -5,6 +5,7 @@ export const WEB_CONFIG_KEYS = [
   "connector",
   "browser",
   "cdp",
+  "subagents",
 ] as const;
 
 export const WEB_CLEARABLE_KEYS = [
@@ -13,6 +14,7 @@ export const WEB_CLEARABLE_KEYS = [
   "tunnel-bin",
   "connector",
   "browser",
+  "subagents",
 ] as const;
 
 export type WebConfigKey = (typeof WEB_CONFIG_KEYS)[number];
@@ -25,6 +27,7 @@ export type WebCommand =
   | { kind: "open" }
   | { kind: "status" }
   | { kind: "config" }
+  | { kind: "limit"; value?: number | "default" }
   | { kind: "tunnel"; action: "start" | "stop" | "restart" | "status" }
   | { kind: "set"; key: WebConfigKey; value: string }
   | { kind: "unset"; key: WebClearableKey }
@@ -45,7 +48,8 @@ const ROOT_COMMANDS: ReadonlyArray<{
   { name: "start", description: "Prepare the Web transport and switch to chatgpt-web/web" },
   { name: "use", description: "Switch the current session to chatgpt-web/web" },
   { name: "open", description: "Open the dedicated browser profile for sign-in" },
-  { name: "status", description: "Show provider, browser, MCP, and tunnel status" },
+  { name: "status", description: "Show provider, browser, MCP, tunnel, and subagent status" },
+  { name: "limit", description: "Show or set the per-root Web subagent hard cap", usage: "[N|off|default]" },
   { name: "tunnel", description: "Start or manage the Secure MCP Tunnel", usage: "[start|stop|restart|status]" },
   { name: "config", description: "Show the saved ChatGPT Web configuration" },
   { name: "set", description: "Set a saved ChatGPT Web configuration value", usage: "<key> <value>" },
@@ -67,7 +71,12 @@ export const WEB_HELP_TEXT = [
   "  /web start                 prepare transport + switch to chatgpt-web/web",
   "  /web use                   switch model only",
   "  /web open                  open the sign-in browser profile",
-  "  /web status                show provider/browser/tunnel status",
+  "  /web status                show provider/browser/tunnel/subagent status",
+  "  /web limit                 show the current subagent hard cap",
+  "  /web limit 4               allow at most 4 Web subagents per root session",
+  "  /web limit 0               block all Web subagents",
+  "  /web limit off             disable the hard cap",
+  "  /web limit default         restore the default cap",
   "",
   "Tunnel:",
   "  /web tunnel               start it (idempotent)",
@@ -83,7 +92,8 @@ export const WEB_HELP_TEXT = [
   "  /web set connector <name>",
   "  /web set browser <path>",
   "  /web set cdp <port>",
-  "  /web unset tunnel|api|tunnel-bin|connector|browser",
+  "  /web set subagents <count>",
+  "  /web unset tunnel|api|tunnel-bin|connector|browser|subagents",
 ].join("\n");
 
 function splitHead(raw: string): { head: string; tail: string } {
@@ -125,6 +135,17 @@ export function parseWebCommand(raw: string): WebCommand {
   if (head === "config") {
     return tail ? { kind: "invalid", message: "Usage: /web config" } : { kind: "config" };
   }
+  if (head === "limit") {
+    const value = tail.toLowerCase();
+    if (!value) return { kind: "limit" };
+    if (value === "off" || value === "unlimited") return { kind: "limit", value: -1 };
+    if (value === "default" || value === "reset") return { kind: "limit", value: "default" };
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      return { kind: "invalid", message: "Usage: /web limit [non-negative integer|off|default]" };
+    }
+    return { kind: "limit", value: parsed };
+  }
 
   if (head === "tunnel") {
     const action = (tail || "start").toLowerCase();
@@ -144,7 +165,7 @@ export function parseWebCommand(raw: string): WebCommand {
     if (!key || !value) {
       return {
         kind: "invalid",
-        message: "Usage: /web set tunnel|api|tunnel-bin|connector|browser|cdp <value>",
+        message: "Usage: /web set tunnel|api|tunnel-bin|connector|browser|cdp|subagents <value>",
       };
     }
     if (!isConfigKey(key)) {
@@ -161,7 +182,7 @@ export function parseWebCommand(raw: string): WebCommand {
     if (!key || key.includes(" ")) {
       return {
         kind: "invalid",
-        message: "Usage: /web unset tunnel|api|tunnel-bin|connector|browser",
+        message: "Usage: /web unset tunnel|api|tunnel-bin|connector|browser|subagents",
       };
     }
     if (!isClearableKey(key)) {
@@ -204,6 +225,20 @@ export function getWebArgumentCompletions(argumentPrefix: string): WebCommandCom
 
   const root = argumentPrefix.slice(0, firstSpace).trim().toLowerCase();
   const rest = argumentPrefix.slice(firstSpace + 1);
+
+  if (root === "limit" && !rest.trim().includes(" ")) {
+    const normalized = rest.trim().toLowerCase();
+    const items = [
+      { name: "0", description: "Block all Web subagents" },
+      { name: "1", description: "Allow 1 Web subagent per root session" },
+      { name: "2", description: "Allow 2 Web subagents per root session" },
+      { name: "4", description: "Allow 4 Web subagents per root session" },
+      { name: "8", description: "Allow 8 Web subagents per root session" },
+      { name: "off", description: "Disable the hard cap" },
+      { name: "default", description: "Restore the default cap" },
+    ];
+    return filterCompletions(normalized, items, "limit ");
+  }
 
   if (root === "tunnel" && !rest.trim().includes(" ")) {
     return filterCompletions(rest.trim(), TUNNEL_ACTIONS, "tunnel ");
