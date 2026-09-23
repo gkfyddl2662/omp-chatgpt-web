@@ -95,7 +95,7 @@ export const WEB_HELP_TEXT = [
   "  /web set browser <path>",
   "  /web set cdp <port>",
   "  /web set subagents <count>",
-  "  /web set insert default|lexical",
+  "  /web set insert default|editor",
   "  /web unset tunnel|api|tunnel-bin|connector|browser|subagents|insert",
 ].join("\n");
 
@@ -247,13 +247,29 @@ export function getWebArgumentCompletions(argumentPrefix: string): WebCommandCom
     return filterCompletions(rest.trim(), TUNNEL_ACTIONS, "tunnel ");
   }
 
-  if (root === "set" && !rest.trim().includes(" ")) {
-    const items = WEB_CONFIG_KEYS.map(name => ({
-      name,
-      description: "Set " + name,
-      usage: "<value>",
-    }));
-    return filterCompletions(rest.trim(), items, "set ");
+  if (root === "set") {
+    const firstSpace = rest.indexOf(" ");
+    if (firstSpace < 0) {
+      const items = WEB_CONFIG_KEYS.map(name => ({
+        name,
+        description: "Set " + name,
+        usage: "<value>",
+      }));
+      return filterCompletions(rest.trim(), items, "set ");
+    }
+
+    const key = rest.slice(0, firstSpace).trim().toLowerCase();
+    const valuePrefix = rest.slice(firstSpace + 1).trim().toLowerCase();
+    if (key === "insert" && !valuePrefix.includes(" ")) {
+      return filterCompletions(
+        valuePrefix,
+        [
+          { name: "default", description: "Use the normal execCommand/CDP insertion path" },
+          { name: "editor", description: "Use a direct ProseMirror/Lexical editor transaction when available" },
+        ],
+        "set insert ",
+      );
+    }
   }
 
   if (root === "unset" && !rest.trim().includes(" ")) {
