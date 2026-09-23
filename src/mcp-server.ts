@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { TurnBroker } from "./turn-broker.js";
 
 const SERVER_NAME = "omp-chatgpt-web";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.3.0-beta.1";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 
