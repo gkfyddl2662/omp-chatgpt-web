@@ -1,13 +1,22 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
-import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright-core";
+import {
+  chromium,
+  type Browser,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "playwright-core";
 import type { RuntimeConfig } from "./config.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function firstVisible(locators: Locator[], timeout = 500): Promise<Locator | undefined> {
+async function firstVisible(
+  locators: Locator[],
+  timeout = 500,
+): Promise<Locator | undefined> {
   for (const locator of locators) {
     try {
       if (await locator.first().isVisible({ timeout })) return locator.first();
@@ -23,10 +32,18 @@ interface BrowserTurn {
   approvalTimer?: ReturnType<typeof setInterval>;
 }
 
+interface BrowserSession {
+  page: Page;
+  seeded: boolean;
+  resetAfterTurn: boolean;
+  lastUsedAt: number;
+}
+
 export class ChatGptBrowserBackend {
   #browser?: Browser;
   #context?: BrowserContext;
   readonly #turns = new Map<string, BrowserTurn>();
+  readonly #sessions = new Map<string, BrowserSession>();
 
   async openLogin(config: RuntimeConfig): Promise<void> {
     if (!config.browserExecutable) {
@@ -103,10 +120,9 @@ export class ChatGptBrowserBackend {
       return this.#context;
     }
 
-    // The user may have closed the Chrome window manually while OMP still held
-    // Playwright objects. Drop those stale handles before reconnecting.
     this.#browser = undefined;
     this.#context = undefined;
+    this.#pruneClosedSessions();
 
     await this.#openAutomation(config);
 
@@ -116,46 +132,57 @@ export class ChatGptBrowserBackend {
 
     if (!context) {
       await browser.close().catch(() => undefined);
-      throw new Error("Connected to Chrome over CDP but no browser context was available.");
+      throw new Error(
+        "Connected to Chrome over CDP but no browser context was available.",
+      );
     }
 
     this.#browser = browser;
     this.#context = context;
 
     browser.once("disconnected", () => {
-      if (this.#browser === browser) {
-        this.#browser = undefined;
-        this.#context = undefined;
-      }
+      if (this.#browser !== browser) return;
+      this.#browser = undefined;
+      this.#context = undefined;
+      this.#turns.clear();
+      this.#sessions.clear();
     });
 
     return context;
   }
 
-  async #newPage(config: RuntimeConfig): Promise<Page> {
+  #pruneClosedSessions(): void {
+    for (const [key, session] of this.#sessions) {
+      if (session.page.isClosed()) this.#sessions.delete(key);
+    }
+    for (const [key, turn] of this.#turns) {
+      if (turn.page.isClosed()) {
+        if (turn.approvalTimer) clearInterval(turn.approvalTimer);
+        this.#turns.delete(key);
+      }
+    }
+  }
+
+  async #acquireUnownedPage(config: RuntimeConfig): Promise<Page> {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const context = await this.#connect(config);
-        const activePages = new Set(
-          [...this.#turns.values()]
-            .map(turn => turn.page)
+        this.#pruneClosedSessions();
+
+        const ownedPages = new Set(
+          [...this.#sessions.values()]
+            .map(session => session.page)
             .filter(page => !page.isClosed()),
         );
-
-        // Chrome always opens one startup tab. Reuse that tab instead of
-        // creating another visible tab. Also clean up stale restored/idle tabs
-        // that do not belong to a live OMP turn.
         const idlePages = context.pages().filter(
-          page => !page.isClosed() && !activePages.has(page),
+          page => !page.isClosed() && !ownedPages.has(page),
         );
 
         const reusable = idlePages[0];
         if (reusable) {
-          await Promise.allSettled(
-            idlePages.slice(1).map(page => page.close()),
-          );
+          await Promise.allSettled(idlePages.slice(1).map(page => page.close()));
           return reusable;
         }
 
@@ -164,7 +191,7 @@ export class ChatGptBrowserBackend {
         lastError = error;
         this.#browser = undefined;
         this.#context = undefined;
-
+        this.#pruneClosedSessions();
         if (attempt === 0) {
           await sleep(300);
           continue;
@@ -177,26 +204,22 @@ export class ChatGptBrowserBackend {
       : new Error(String(lastError));
   }
 
-  async #openChatPage(config: RuntimeConfig): Promise<Page> {
+  async #navigateFreshChat(page: Page, config: RuntimeConfig): Promise<void> {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      const page = await this.#newPage(config);
       try {
         await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
-        return page;
+        await this.#requireComposer(page);
+        return;
       } catch (error) {
         lastError = error;
-        await page.close().catch(() => undefined);
-
         const message = error instanceof Error ? error.message : String(error);
         const retryable =
-          /ERR_ABORTED|Target page, context or browser has been closed|has been closed/i.test(message);
-
-        if (!retryable || attempt > 0) throw error;
-
-        this.#browser = undefined;
-        this.#context = undefined;
+          /ERR_ABORTED|Target page, context or browser has been closed|has been closed/i.test(
+            message,
+          );
+        if (!retryable || attempt > 0 || page.isClosed()) throw error;
         await sleep(350);
       }
     }
@@ -206,22 +229,83 @@ export class ChatGptBrowserBackend {
       : new Error(String(lastError));
   }
 
+  async #newSessionPage(config: RuntimeConfig): Promise<Page> {
+    const page = await this.#acquireUnownedPage(config);
+    try {
+      await this.#navigateFreshChat(page, config);
+      return page;
+    } catch (error) {
+      await page.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async #session(
+    sessionKey: string,
+    config: RuntimeConfig,
+  ): Promise<BrowserSession> {
+    const existing = this.#sessions.get(sessionKey);
+    if (
+      existing &&
+      !existing.page.isClosed() &&
+      this.#browser?.isConnected()
+    ) {
+      existing.lastUsedAt = Date.now();
+      return existing;
+    }
+
+    if (existing) this.#sessions.delete(sessionKey);
+    const page = await this.#newSessionPage(config);
+    const session: BrowserSession = {
+      page,
+      seeded: false,
+      resetAfterTurn: false,
+      lastUsedAt: Date.now(),
+    };
+    this.#sessions.set(sessionKey, session);
+    return session;
+  }
+
   async #cdpReady(endpoint: string): Promise<boolean> {
     try {
-      const response = await fetch(endpoint + "/json/version", { signal: AbortSignal.timeout(750) });
+      const response = await fetch(endpoint + "/json/version", {
+        signal: AbortSignal.timeout(750),
+      });
       return response.ok;
     } catch {
       return false;
     }
   }
 
+  hasRetainedConversation(sessionKey: string): boolean {
+    const session = this.#sessions.get(sessionKey);
+    return Boolean(
+      session &&
+        session.seeded &&
+        !session.resetAfterTurn &&
+        !session.page.isClosed() &&
+        this.#browser?.isConnected(),
+    );
+  }
+
+  hasSession(sessionKey: string): boolean {
+    const session = this.#sessions.get(sessionKey);
+    return Boolean(session && !session.page.isClosed());
+  }
+
+  isTurnActive(sessionKey: string): boolean {
+    return this.#turns.has(sessionKey);
+  }
+
   async status(config?: RuntimeConfig): Promise<{
     open: boolean;
     attached: boolean;
     tabs: number;
+    retainedSessions: number;
     activeTurns: number;
     urls: string[];
   }> {
+    this.#pruneClosedSessions();
     const open = config
       ? await this.#cdpReady("http://127.0.0.1:" + config.browserCdpPort)
       : Boolean(this.#context);
@@ -229,8 +313,11 @@ export class ChatGptBrowserBackend {
       open,
       attached: Boolean(this.#browser?.isConnected() && this.#context),
       tabs: this.#context?.pages().filter(page => !page.isClosed()).length ?? 0,
+      retainedSessions: this.#sessions.size,
       activeTurns: this.#turns.size,
-      urls: [...this.#turns.values()].map(turn => turn.page.url()),
+      urls: [...this.#sessions.values()]
+        .filter(session => !session.page.isClosed())
+        .map(session => session.page.url()),
     };
   }
 
@@ -240,20 +327,29 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
   ): Promise<void> {
     if (this.#turns.has(sessionKey)) {
-      throw new Error("ChatGPT Web turn already exists for session " + sessionKey);
+      throw new Error(
+        "ChatGPT Web turn already exists for session " + sessionKey,
+      );
     }
-    const page = await this.#openChatPage(config);
+
+    const session = await this.#session(sessionKey, config);
+    if (session.resetAfterTurn) {
+      await this.#resetSessionPage(sessionKey, config);
+    }
+
+    const page = session.page;
     let composer: Locator;
     try {
       composer = await this.#requireComposer(page);
       await this.#mentionConnector(page, composer, config.connectorName);
     } catch (error) {
-      await page.close().catch(() => undefined);
+      await this.invalidateSession(sessionKey);
       throw error;
     }
 
     const turn: BrowserTurn = { page };
     this.#turns.set(sessionKey, turn);
+
     if (config.autoApproveToolCalls) {
       turn.approvalTimer = setInterval(() => {
         void this.#approveOnce(page);
@@ -261,13 +357,141 @@ export class ChatGptBrowserBackend {
       turn.approvalTimer.unref?.();
     }
 
+    const baselineUsers = await page
+      .locator('[data-message-author-role="user"]')
+      .count()
+      .catch(() => 0);
+
     try {
       await composer.click();
       await page.keyboard.insertText(" " + prompt);
       await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page);
+      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      session.seeded = true;
+      session.lastUsedAt = Date.now();
     } catch (error) {
-      await this.releaseTurn(sessionKey);
+      await this.invalidateSession(sessionKey);
+      throw error;
+    }
+  }
+
+  async finishTurn(
+    sessionKey: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const turn = this.#turns.get(sessionKey);
+    const session = this.#sessions.get(sessionKey);
+
+    if (turn && !turn.page.isClosed()) {
+      await this.#waitUntilIdle(turn.page, Math.min(config.turnTimeoutMs, 15_000), signal)
+        .catch(() => undefined);
+    }
+
+    if (turn?.approvalTimer) clearInterval(turn.approvalTimer);
+    this.#turns.delete(sessionKey);
+
+    if (session) {
+      session.lastUsedAt = Date.now();
+      if (session.resetAfterTurn) {
+        await this.#resetSessionPage(sessionKey, config);
+      }
+    }
+  }
+
+  async markResetAfterTurn(sessionKey: string): Promise<void> {
+    const session = this.#sessions.get(sessionKey);
+    if (session) session.resetAfterTurn = true;
+  }
+
+  async resetSession(
+    sessionKey: string,
+    config: RuntimeConfig,
+  ): Promise<void> {
+    if (this.#turns.has(sessionKey)) {
+      const session = this.#sessions.get(sessionKey);
+      if (session) session.resetAfterTurn = true;
+      return;
+    }
+    await this.#resetSessionPage(sessionKey, config);
+  }
+
+  async #resetSessionPage(
+    sessionKey: string,
+    config: RuntimeConfig,
+  ): Promise<void> {
+    const session = this.#sessions.get(sessionKey);
+    if (!session) return;
+
+    if (session.page.isClosed() || !this.#browser?.isConnected()) {
+      this.#sessions.delete(sessionKey);
+      return;
+    }
+
+    try {
+      await this.#navigateFreshChat(session.page, config);
+      session.seeded = false;
+      session.resetAfterTurn = false;
+      session.lastUsedAt = Date.now();
+    } catch {
+      await this.invalidateSession(sessionKey);
+    }
+  }
+
+  async compactRetainedSession(
+    sessionKey: string,
+    prompt: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (this.#turns.has(sessionKey)) {
+      throw new Error(
+        "Cannot submit retained compaction while the ChatGPT turn is still active.",
+      );
+    }
+
+    const session = this.#sessions.get(sessionKey);
+    if (
+      !session ||
+      !session.seeded ||
+      session.page.isClosed() ||
+      !this.#browser?.isConnected()
+    ) {
+      throw new Error(
+        "No retained ChatGPT conversation is available for compaction.",
+      );
+    }
+
+    const page = session.page;
+    const composer = await this.#requireComposer(page);
+    const baselineAssistants = await page
+      .locator('[data-message-author-role="assistant"]')
+      .count()
+      .catch(() => 0);
+    const baselineUsers = await page
+      .locator('[data-message-author-role="user"]')
+      .count()
+      .catch(() => 0);
+
+    try {
+      await composer.fill(prompt);
+      await composer.press("Enter");
+      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      const summary = await this.#waitForAssistantText(
+        page,
+        config.turnTimeoutMs,
+        signal,
+        baselineAssistants,
+      );
+
+      // Match codex-chatgpt-web retained compaction semantics: the compact
+      // response comes from the retained conversation, then that SAME tab is
+      // reset to a fresh chat. The next ordinary OMP turn seeds the compacted
+      // OMP context into this fresh conversation.
+      await this.#resetSessionPage(sessionKey, config);
+      return summary;
+    } catch (error) {
+      await this.invalidateSession(sessionKey);
       throw error;
     }
   }
@@ -277,17 +501,38 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
-    const page = await this.#openChatPage(config);
+    const page = await this.#acquireUnownedPage(config);
     try {
+      await this.#navigateFreshChat(page, config);
       if (signal?.aborted) {
-        throw signal.reason ?? new DOMException("Text-only Web request aborted", "AbortError");
+        throw signal.reason ??
+          new DOMException("Text-only Web request aborted", "AbortError");
       }
+
       const composer = await this.#requireComposer(page);
-      await this.#assertNoConnectorSelected(page, composer, config.connectorName);
+      const baselineAssistants = await page
+        .locator('[data-message-author-role="assistant"]')
+        .count()
+        .catch(() => 0);
+      const baselineUsers = await page
+        .locator('[data-message-author-role="user"]')
+        .count()
+        .catch(() => 0);
+
+      await this.#assertNoConnectorSelected(
+        page,
+        composer,
+        config.connectorName,
+      );
       await composer.fill(prompt);
       await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page);
-      return await this.#waitForAssistantText(page, config.turnTimeoutMs, signal);
+      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      return await this.#waitForAssistantText(
+        page,
+        config.turnTimeoutMs,
+        signal,
+        baselineAssistants,
+      );
     } finally {
       await page.close().catch(() => undefined);
     }
@@ -298,16 +543,27 @@ export class ChatGptBrowserBackend {
     if (!turn) return;
     this.#turns.delete(sessionKey);
     if (turn.approvalTimer) clearInterval(turn.approvalTimer);
-    try {
-      await turn.page.close();
-    } catch {
-      // Browser cleanup is best-effort after the OMP turn has already settled.
+  }
+
+  async invalidateSession(sessionKey: string): Promise<void> {
+    const turn = this.#turns.get(sessionKey);
+    if (turn?.approvalTimer) clearInterval(turn.approvalTimer);
+    this.#turns.delete(sessionKey);
+
+    const session = this.#sessions.get(sessionKey);
+    this.#sessions.delete(sessionKey);
+    if (session && !session.page.isClosed()) {
+      await session.page.close().catch(() => undefined);
     }
   }
 
   async close(): Promise<void> {
-    const keys = [...this.#turns.keys()];
-    await Promise.allSettled(keys.map(key => this.releaseTurn(key)));
+    for (const turn of this.#turns.values()) {
+      if (turn.approvalTimer) clearInterval(turn.approvalTimer);
+    }
+    this.#turns.clear();
+    this.#sessions.clear();
+
     const browser = this.#browser;
     this.#browser = undefined;
     this.#context = undefined;
@@ -315,16 +571,24 @@ export class ChatGptBrowserBackend {
   }
 
   async #composer(page: Page): Promise<Locator | undefined> {
-    return firstVisible([
-      page.locator("#prompt-textarea"),
-      page.locator('[contenteditable="true"][data-virtualkeyboard="true"]'),
-      page.locator('textarea[placeholder*="Message"]'),
-    ], 700);
+    return firstVisible(
+      [
+        page.locator("#prompt-textarea"),
+        page.locator(
+          '[contenteditable="true"][data-virtualkeyboard="true"]',
+        ),
+        page.locator('textarea[placeholder*="Message"]'),
+      ],
+      700,
+    );
   }
 
   async #requireComposer(page: Page): Promise<Locator> {
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
+      if (page.isClosed()) {
+        throw new Error("ChatGPT tab was closed.");
+      }
       const composer = await this.#composer(page);
       if (composer) return composer;
       await sleep(300);
@@ -340,51 +604,52 @@ export class ChatGptBrowserBackend {
     connectorName: string,
   ): Promise<void> {
     await composer.click();
-
-    // A fresh Temporary Chat should have an empty composer. Clear any stale draft
-    // before inserting the app mention.
     await page.keyboard.press("Control+A").catch(() => undefined);
     await page.keyboard.press("Backspace").catch(() => undefined);
 
-    const mentionQuery = connectorName.trim().split(/\s+/)[0] || connectorName;
+    const mentionQuery =
+      connectorName.trim().split(/\s+/)[0] || connectorName;
     await page.keyboard.type("@" + mentionQuery, { delay: 35 });
 
-    const suggestion = await firstVisible([
-      page.getByRole("option", { name: connectorName, exact: true }),
-      page.getByRole("menuitem", { name: connectorName, exact: true }),
-      page.getByRole("button", { name: connectorName, exact: true }),
-      page.getByText(connectorName, { exact: true }),
-    ], 2_000);
+    const suggestion = await firstVisible(
+      [
+        page.getByRole("option", { name: connectorName, exact: true }),
+        page.getByRole("menuitem", { name: connectorName, exact: true }),
+        page.getByRole("button", { name: connectorName, exact: true }),
+        page.getByText(connectorName, { exact: true }),
+      ],
+      2_000,
+    );
 
     if (suggestion) {
       await suggestion.click();
     } else {
-      // Current ChatGPT builds can highlight the best @mention suggestion
-      // without exposing a stable option/menuitem node. Match the manual UX:
-      // type "@OMP", then press Enter to accept the highlighted app.
       await page.keyboard.press("Enter");
     }
     await sleep(300);
 
-    // The app mention usually becomes a structured chip/token inside or adjacent
-    // to the composer. Verify visible evidence without rewriting the composer.
     const composerContainer = composer.locator(
       "xpath=ancestor::*[self::form or @data-type='unified-composer'][1]",
     );
-    const mentioned = await firstVisible([
-      composerContainer.getByText(connectorName, { exact: true }),
-      page.locator('[data-mention], [data-app-id], [data-testid*="mention"]').filter({
-        hasText: connectorName,
-      }),
-    ], 1_000);
+    const mentioned = await firstVisible(
+      [
+        composerContainer.getByText(connectorName, { exact: true }),
+        page
+          .locator(
+            '[data-mention], [data-app-id], [data-testid*="mention"]',
+          )
+          .filter({ hasText: connectorName }),
+      ],
+      1_000,
+    );
 
     if (!mentioned) {
-      // Some ChatGPT surfaces don't expose the mention chip to accessibility
-      // selectors. The suggestion click itself is still stronger evidence than
-      // the old '+' menu path, so only fail if the literal query remains in the
-      // composer as plain text.
-      const currentText = (await composer.innerText().catch(() => "")).trim();
-      const currentValue = (await composer.inputValue().catch(() => "")).trim();
+      const currentText = (
+        await composer.innerText().catch(() => "")
+      ).trim();
+      const currentValue = (
+        await composer.inputValue().catch(() => "")
+      ).trim();
       const plain = currentText || currentValue;
       if (plain === "@" + mentionQuery) {
         throw new Error(
@@ -402,12 +667,16 @@ export class ChatGptBrowserBackend {
     connectorName: string,
   ): Promise<void> {
     const selected = page
-      .locator('[aria-pressed="true"], [data-state="checked"], [data-state="on"]')
+      .locator(
+        '[aria-pressed="true"], [data-state="checked"], [data-state="on"]',
+      )
       .filter({ hasText: connectorName });
     const container = composer.locator(
       "xpath=ancestor::*[self::form or @data-type='unified-composer'][1]",
     );
-    const nearComposer = container.getByText(connectorName, { exact: true });
+    const nearComposer = container.getByText(connectorName, {
+      exact: true,
+    });
     const attached = await firstVisible([selected, nearComposer], 100);
     if (attached) {
       throw new Error(
@@ -418,26 +687,74 @@ export class ChatGptBrowserBackend {
     }
   }
 
-  async #waitForSubmissionEvidence(page: Page): Promise<void> {
+  async #waitForSubmissionEvidence(
+    page: Page,
+    baselineUserTurns = 0,
+  ): Promise<void> {
     const deadline = Date.now() + 12_000;
     while (Date.now() < deadline) {
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
       const userTurns = page.locator('[data-message-author-role="user"]');
-      if ((await userTurns.count().catch(() => 0)) > 0) return;
-      const stop = await firstVisible([
-        page.locator('button[data-testid="stop-button"]'),
-        page.getByRole("button", { name: /Stop streaming|Stop generating/i }),
-        page.getByRole("button", { name: /생성 중지|응답 중지/ }),
-      ]);
+      if ((await userTurns.count().catch(() => 0)) > baselineUserTurns) {
+        return;
+      }
+
+      const stop = await this.#stopButton(page);
       if (stop) return;
       await sleep(250);
     }
-    throw new Error("ChatGPT Web did not show evidence that the OMP provider prompt was submitted.");
+    throw new Error(
+      "ChatGPT Web did not show evidence that the OMP provider prompt was submitted.",
+    );
+  }
+
+  async #stopButton(page: Page): Promise<Locator | undefined> {
+    return firstVisible(
+      [
+        page.locator('button[data-testid="stop-button"]'),
+        page.getByRole("button", {
+          name: /Stop streaming|Stop generating/i,
+        }),
+        page.getByRole("button", { name: /생성 중지|응답 중지/ }),
+      ],
+      100,
+    );
+  }
+
+  async #waitUntilIdle(
+    page: Page,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let idleSince = 0;
+
+    // Give the browser time to consume the MCP response for omp_turn_complete.
+    await sleep(400);
+
+    while (Date.now() < deadline) {
+      if (signal?.aborted) {
+        throw signal.reason ??
+          new DOMException("ChatGPT turn settlement aborted", "AbortError");
+      }
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+
+      const stop = await this.#stopButton(page);
+      if (!stop) {
+        if (!idleSince) idleSince = Date.now();
+        if (Date.now() - idleSince >= 700) return;
+      } else {
+        idleSince = 0;
+      }
+      await sleep(200);
+    }
   }
 
   async #waitForAssistantText(
     page: Page,
     timeoutMs: number,
     signal?: AbortSignal,
+    baselineAssistantTurns = 0,
   ): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     let lastText = "";
@@ -445,13 +762,22 @@ export class ChatGptBrowserBackend {
 
     while (Date.now() < deadline) {
       if (signal?.aborted) {
-        throw signal.reason ?? new DOMException("Text-only Web request aborted", "AbortError");
+        throw signal.reason ??
+          new DOMException("Text-only Web request aborted", "AbortError");
       }
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
 
-      const assistantTurns = page.locator('[data-message-author-role="assistant"]');
+      const assistantTurns = page.locator(
+        '[data-message-author-role="assistant"]',
+      );
       const count = await assistantTurns.count().catch(() => 0);
-      if (count > 0) {
-        const text = (await assistantTurns.nth(count - 1).innerText().catch(() => "")).trim();
+      if (count > baselineAssistantTurns) {
+        const text = (
+          await assistantTurns
+            .nth(count - 1)
+            .innerText()
+            .catch(() => "")
+        ).trim();
         if (text && text === lastText) {
           if (!stableSince) stableSince = Date.now();
         } else if (text) {
@@ -460,27 +786,32 @@ export class ChatGptBrowserBackend {
         }
       }
 
-      const stop = await firstVisible([
-        page.locator('button[data-testid="stop-button"]'),
-        page.getByRole("button", { name: /Stop streaming|Stop generating/i }),
-        page.getByRole("button", { name: /생성 중지|응답 중지/ }),
-      ], 100);
-
-      if (lastText && stableSince && Date.now() - stableSince >= 1_500 && !stop) {
+      const stop = await this.#stopButton(page);
+      if (
+        lastText &&
+        stableSince &&
+        Date.now() - stableSince >= 1_500 &&
+        !stop
+      ) {
         return lastText;
       }
       await sleep(250);
     }
 
-    throw new Error("ChatGPT Web text-only request timed out after " + timeoutMs + "ms.");
+    throw new Error(
+      "ChatGPT Web text-only request timed out after " + timeoutMs + "ms.",
+    );
   }
 
   async #approveOnce(page: Page): Promise<void> {
     if (page.isClosed()) return;
-    const allow = await firstVisible([
-      page.getByRole("button", { name: /Allow once/i }),
-      page.getByRole("button", { name: /한 번 허용/ }),
-    ], 100);
+    const allow = await firstVisible(
+      [
+        page.getByRole("button", { name: /Allow once/i }),
+        page.getByRole("button", { name: /한 번 허용/ }),
+      ],
+      100,
+    );
     if (allow) await allow.click().catch(() => undefined);
   }
 }
