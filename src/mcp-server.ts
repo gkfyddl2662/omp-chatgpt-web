@@ -94,8 +94,18 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return text ? JSON.parse(text) : {};
 }
 
+export interface McpTraceEntry {
+  at: string;
+  method: string;
+  id: string | number | null;
+  protocolVersion?: string;
+  ok: boolean;
+  errorCode?: number;
+}
+
 export interface McpServerHandle {
   url: string;
+  trace(): McpTraceEntry[];
   close(): Promise<void>;
 }
 
@@ -104,6 +114,12 @@ export async function createMcpServer(options: {
   port: number;
   broker: TurnBroker;
 }): Promise<McpServerHandle> {
+  const trace: McpTraceEntry[] = [];
+  const pushTrace = (entry: McpTraceEntry) => {
+    trace.push(entry);
+    if (trace.length > 50) trace.splice(0, trace.length - 50);
+  };
+
   const execute = async (
     request: JsonRpcRequest,
     signal: AbortSignal,
@@ -294,12 +310,31 @@ export async function createMcpServer(options: {
         const httpProtocolVersion = Array.isArray(protocolHeader)
           ? protocolHeader[0]
           : protocolHeader;
+        const rpcRequest = raw as JsonRpcRequest;
         const output = await execute(
-          raw as JsonRpcRequest,
+          rpcRequest,
           controller.signal,
           httpProtocolVersion,
         );
         if (output !== undefined) outputs.push(output);
+
+        const errorCode =
+          output &&
+          typeof output === "object" &&
+          !Array.isArray(output) &&
+          Reflect.get(output, "error") &&
+          typeof Reflect.get(output, "error") === "object"
+            ? Number(Reflect.get(Reflect.get(output, "error") as object, "code"))
+            : undefined;
+
+        pushTrace({
+          at: new Date().toISOString(),
+          method: rpcRequest.method || "(missing)",
+          id: rpcRequest.id ?? null,
+          protocolVersion: requestProtocolVersion(rpcRequest, httpProtocolVersion),
+          ok: errorCode === undefined,
+          ...(errorCode !== undefined ? { errorCode } : {}),
+        });
       }
       if (outputs.length === 0) {
         response.writeHead(202);
@@ -327,6 +362,7 @@ export async function createMcpServer(options: {
       }
       resolve({
         url: "http://" + options.host + ":" + address.port + "/mcp",
+        trace: () => trace.slice(),
         close: () => new Promise<void>((done, fail) => {
           server.close(error => error ? fail(error) : done());
         }),
