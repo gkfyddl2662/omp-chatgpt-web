@@ -44,7 +44,7 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "paste" | "execCommand" | "cdp";
+  insertMode: "execCommand" | "cdp";
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -780,60 +780,18 @@ export class ChatGptBrowserBackend {
     composer: Locator,
     text: string,
   ): Promise<{
-    mode: "paste" | "execCommand" | "cdp";
+    mode: "execCommand" | "cdp";
     editMs: number;
     verifyMs: number;
   }> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
-
     const editStartedAt = Date.now();
 
-    // Preferred fast path for large prompts: let ChatGPT/Lexical process one
-    // paste transaction. This does not touch the user's OS clipboard and does
-    // not alter the prompt string.
-    const pasteDispatched = await composer.evaluate((element, value) => {
-      try {
-        const data = new DataTransfer();
-        data.setData("text/plain", String(value));
-        const event = new ClipboardEvent("paste", {
-          clipboardData: data,
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-        });
-        element.dispatchEvent(event);
-        return true;
-      } catch {
-        return false;
-      }
-    }, text).catch(() => false);
-
-    if (pasteDispatched) {
-      const pasteDeadline = Date.now() + 250;
-      while (Date.now() < pasteDeadline) {
-        const actual = await this.#composerPromptText(composer);
-        if (actual !== before) {
-          const verifiedAt = Date.now();
-          if (!this.#verifyComposerInsertion(before, actual, text)) {
-            throw new Error(
-              "ChatGPT composer prompt verification failed after paste " +
-                "(prompt " + text.length +
-                " chars, observed " + actual.length + " chars).",
-            );
-          }
-          return {
-            mode: "paste",
-            editMs: verifiedAt - editStartedAt,
-            verifyMs: 0,
-          };
-        }
-        await sleep(15);
-      }
-    }
-
-    // Compatibility path: one browser editing operation. This is the same
-    // plain-text editor primitive used by codex-chatgpt-web.
+    // Keep the prompt inline in ChatGPT's composer. Do not synthesize a paste
+    // event: ChatGPT can convert large pasted text into a "Pasted text"
+    // attachment/card, which is a different transport than the requested
+    // byte-identical inline prompt.
     const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
       if (document.activeElement !== el) el.focus();
