@@ -120,3 +120,28 @@ test("compaction watches ChatGPT error UI before accepting assistant text", () =
   assert.match(browserSource, /Retry\|Try again\|다시 시도/);
   assert.match(browserSource, /assertValidCompactionSummary/);
 });
+
+
+test("ordinary Web turns detect ChatGPT timeout UI without clicking browser Retry", () => {
+  assert.match(browserSource, /메시지 전송 시간이 초과되었습니다/);
+  assert.match(browserSource, /waitForTurnFailure/);
+  assert.match(providerSource, /Promise\.race\(\[/);
+  assert.match(providerSource, /waitForTurnFailure\(conversation, failureSignal\)/);
+
+  const start = browserSource.indexOf("async waitForTurnFailure(");
+  const end = browserSource.indexOf("async status(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /ChatGptReplayUnsafeTurnError/);
+  assert.doesNotMatch(block, /\.retry\.click\(/);
+});
+
+test("replay-unsafe browser failures are marked non-retryable for OMP", () => {
+  assert.match(providerSource, /ChatGptReplayUnsafeTurnError/);
+  assert.match(providerSource, /AIError\.Flag\.UserInterrupt/);
+  assert.doesNotMatch(
+    providerSource,
+    /browserMessage.*errorMessage|errorMessage.*browserMessage/,
+  );
+});
