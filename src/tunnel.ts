@@ -210,9 +210,12 @@ export class TunnelSupervisor {
 
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
+      if (this.#lastError) {
+        throw new Error(this.#lastError);
+      }
       if (child.exitCode !== null) {
         throw new Error(
-          this.#lastError || "tunnel-client exited before becoming ready",
+          "tunnel-client exited before becoming ready",
         );
       }
 
