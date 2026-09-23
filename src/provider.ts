@@ -157,11 +157,22 @@ function localOmpTitle(context: Context): string {
   return title ? "<title>" + title + "</title>" : "<title/>";
 }
 
-function sessionKey(options?: SimpleStreamOptions): string {
+function requestKey(options?: SimpleStreamOptions): string {
+  return (
+    options?.sessionId?.trim() ||
+    options?.promptCacheKey?.trim() ||
+    "request_" + randomUUID().replace(/-/g, "")
+  );
+}
+
+function conversationKey(
+  options: SimpleStreamOptions | undefined,
+  fallback: string,
+): string {
   return (
     options?.promptCacheKey?.trim() ||
     options?.sessionId?.trim() ||
-    "ephemeral_" + randomUUID().replace(/-/g, "")
+    fallback
   );
 }
 
@@ -215,7 +226,8 @@ export class WebModelProvider {
     context: Context,
     options?: SimpleStreamOptions,
   ): Promise<void> {
-    const key = sessionKey(options);
+    const request = requestKey(options);
+    const conversation = conversationKey(options, request);
     const signal = options?.signal;
 
     try {
@@ -232,11 +244,11 @@ export class WebModelProvider {
       if (isOmpCompactionContext(context, options)) {
         try {
           let summary: string;
-          const activeTurn = this.#broker.hasActive(key) || this.#browser.isTurnActive(key);
+          const activeTurn = this.#broker.hasActive(request) || this.#browser.isTurnActive(conversation);
 
-          if (this.#browser.hasRetainedConversation(key) && !activeTurn) {
+          if (this.#browser.hasRetainedConversation(conversation) && !activeTurn) {
             summary = await this.#browser.compactRetainedSession(
-              key,
+              conversation,
               compileRetainedCompactionPrompt(context),
               this.#config,
               signal,
@@ -248,11 +260,11 @@ export class WebModelProvider {
               signal,
             );
 
-            if (this.#browser.hasSession(key)) {
+            if (this.#browser.hasSession(conversation)) {
               if (activeTurn) {
-                await this.#browser.markResetAfterTurn(key);
+                await this.#browser.markResetAfterTurn(conversation);
               } else {
-                await this.#browser.resetSession(key, this.#config);
+                await this.#browser.resetSession(conversation, this.#config);
               }
             }
           }
@@ -264,42 +276,42 @@ export class WebModelProvider {
         return;
       }
 
-      const expectedToolCallId = this.#broker.pendingToolCallId(key);
+      const expectedToolCallId = this.#broker.pendingToolCallId(request);
       const toolResult = newestMatchingToolResult(context, expectedToolCallId);
       if (toolResult) {
-        this.#broker.settleToolResult(key, toolResult);
+        this.#broker.settleToolResult(request, toolResult);
       }
 
-      if (!this.#broker.hasActive(key)) {
+      if (!this.#broker.hasActive(request)) {
         await this.#ensureTransport();
-        const turn = this.#broker.begin(key, context.tools ?? []);
-        const prompt = this.#browser.hasRetainedConversation(key)
+        const turn = this.#broker.begin(request, context.tools ?? []);
+        const prompt = this.#browser.hasRetainedConversation(conversation)
           ? compileBrowserContinuationPrompt(context, turn.token)
           : compileBrowserPrompt(context, turn.token);
         try {
-          await this.#browser.startTurn(key, prompt, this.#config);
+          await this.#browser.startTurn(conversation, prompt, this.#config);
         } catch (error) {
-          this.#broker.end(key);
+          this.#broker.end(request);
           throw error;
         }
       } else {
-        this.#broker.updateTools(key, context.tools ?? []);
+        this.#broker.updateTools(request, context.tools ?? []);
       }
 
       const timeoutSignal = AbortSignal.timeout(this.#config.turnTimeoutMs);
       const actionSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-      const action = await this.#broker.nextAction(key, actionSignal);
+      const action = await this.#broker.nextAction(request, actionSignal);
       if (action.type === "tool") {
         pushToolCall(stream, model, action);
         return;
       }
 
-      await this.#browser.finishTurn(key, this.#config, signal);
+      await this.#browser.finishTurn(conversation, this.#config, signal);
       pushText(stream, model, action.answer);
-      this.#broker.end(key);
+      this.#broker.end(request);
     } catch (error) {
-      this.#broker.end(key);
-      await this.#browser.invalidateSession(key).catch(() => undefined);
+      this.#broker.end(request);
+      await this.#browser.invalidateSession(conversation).catch(() => undefined);
       pushError(stream, model, error);
     }
   }
