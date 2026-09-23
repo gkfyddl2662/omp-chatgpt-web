@@ -115,3 +115,34 @@ test("fixed MCP ABI inventories and invokes turn-local OMP tools", async (t) => 
   assert.equal(called.result.structuredContent.tool, "read");
   assert.equal(called.result.structuredContent.is_error, false);
 });
+
+test("turn completion asks ChatGPT to render the same final answer visibly", async (t) => {
+  const broker = new TurnBroker();
+  const { token } = broker.begin("complete-visible", tools);
+  const server = await createMcpServer({ host: "127.0.0.1", port: 0, broker });
+  t.after(() => server.close());
+
+  const completed = await rpc(server.url, 200, "tools/call", {
+    name: "omp_turn_complete",
+    arguments: {
+      turn_token: token,
+      answer: "final answer from OMP",
+    },
+  });
+
+  assert.equal(
+    completed.result.structuredContent.render_final_answer_in_chat,
+    true,
+  );
+  assert.match(
+    completed.result.content[0].text,
+    /render exactly the same final answer/i,
+  );
+
+  const action = await broker.nextAction("complete-visible");
+  assert.deepEqual(action, {
+    type: "complete",
+    token,
+    answer: "final answer from OMP",
+  });
+});

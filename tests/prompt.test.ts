@@ -56,3 +56,19 @@ test("retained continuation sends only the post-assistant delta", () => {
   assert.match(prompt, /new retained-turn request/);
   assert.match(prompt, /turn_next/);
 });
+
+test("browser turn contract requires the completed answer to remain visible in ChatGPT", () => {
+  const seed = compileBrowserPrompt(context(), "turn_seed_visible");
+  const continuation = compileBrowserContinuationPrompt(
+    context(),
+    "turn_next_visible",
+  );
+
+  for (const prompt of [seed, continuation]) {
+    assert.match(
+      prompt,
+      /After omp_turn_complete returns success, render exactly that same answer as normal ChatGPT assistant prose/,
+    );
+    assert.match(prompt, /do not call any more tools/i);
+  }
+});
