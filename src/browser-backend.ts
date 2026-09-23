@@ -904,11 +904,21 @@ export class ChatGptBrowserBackend {
       }
 
       const verifiedAt = Date.now();
-      pasteSucceeded =
-        actual !== before &&
-        this.#verifyComposerInsertion(before, actual, text);
+      if (actual === before) return undefined;
 
-      if (!pasteSucceeded) return undefined;
+      pasteSucceeded = this.#verifyComposerInsertion(
+        before,
+        actual,
+        text,
+      );
+
+      if (!pasteSucceeded) {
+        throw new Error(
+          "ChatGPT changed the composer during trusted clipboard paste " +
+            "(prompt " + text.length +
+            " chars, observed " + actual.length + " chars).",
+        );
+      }
 
       return {
         editMs: editedAt - editStartedAt,
