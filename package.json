@@ -1,7 +1,7 @@
 {
   "name": "omp-chatgpt-web",
-  "version": "0.2.0",
-  "description": "Use normal ChatGPT Web as the actual Oh My Pi model backend, with OMP tools and Goal bridged through native MCP calls.",
+  "version": "0.3.0-beta.1",
+  "description": "Use normal ChatGPT Web as an Oh My Pi model provider while keeping OMP as the local agent and tool runtime.",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -26,8 +26,12 @@
     "@oh-my-pi/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
-    "@oh-my-pi/pi-ai": { "optional": true },
-    "@oh-my-pi/pi-coding-agent": { "optional": true }
+    "@oh-my-pi/pi-ai": {
+      "optional": true
+    },
+    "@oh-my-pi/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@oh-my-pi/pi-ai": "*",
@@ -35,5 +39,21 @@
     "@types/node": "^22.0.0",
     "tsx": "^4.20.0",
     "typescript": "^6.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gkfyddl2662/omp-chatgpt-web.git"
+  },
+  "homepage": "https://github.com/gkfyddl2662/omp-chatgpt-web#readme",
+  "bugs": {
+    "url": "https://github.com/gkfyddl2662/omp-chatgpt-web/issues"
+  },
+  "keywords": [
+    "oh-my-pi",
+    "omp",
+    "chatgpt",
+    "mcp",
+    "playwright",
+    "agent"
+  ]
 }
