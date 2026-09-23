@@ -643,6 +643,51 @@ export class ChatGptBrowserBackend {
     }, text);
   }
 
+  async #mentionSuggestionVisible(
+    page: Page,
+    composer: Locator,
+    connectorName: string,
+  ): Promise<boolean> {
+    const composerHandle = await composer.elementHandle().catch(() => null);
+    return await page.evaluate(
+      ({ name, composerElement }) => {
+        const visible = (element: Element): boolean => {
+          const style = window.getComputedStyle(element);
+          if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            Number(style.opacity || "1") === 0
+          ) {
+            return false;
+          }
+          const rect = element.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+
+        const elements = Array.from(document.querySelectorAll("body *"));
+        return elements.some(element => {
+          if (!visible(element)) return false;
+          if ((element.textContent || "").trim() !== name) return false;
+
+          // Ignore the already-attached inline plugin pill/detail link.
+          const pluginLink = element.closest('a[href*="/plugins/"]');
+          if (pluginLink) return false;
+
+          // Ignore text rendered inside the composer itself.
+          if (
+            composerElement instanceof Element &&
+            composerElement.contains(element)
+          ) {
+            return false;
+          }
+
+          return true;
+        });
+      },
+      { name: connectorName, composerElement: composerHandle },
+    ).catch(() => false);
+  }
+
   async #mentionConnector(
     page: Page,
     composer: Locator,
@@ -651,11 +696,7 @@ export class ChatGptBrowserBackend {
     const mentionQuery =
       connectorName.trim().split(/\s+/)[0] || connectorName;
 
-    // Avoid Playwright/CDP keyboard text injection here. On some ChatGPT
-    // composer builds it is observed twice. fill() uses the editable element's
-    // input semantics directly and should leave exactly one "@OMP" query.
     await composer.fill("@" + mentionQuery);
-    await sleep(150);
 
     const currentMentionText = (
       (await composer.innerText().catch(() => "")) ||
@@ -665,53 +706,28 @@ export class ChatGptBrowserBackend {
     if (currentMentionText !== "@" + mentionQuery) {
       await composer.fill("");
       await composer.fill("@" + mentionQuery);
-      await sleep(150);
     }
 
-    // Never click the connector label globally. ChatGPT renders the already
-    // attached app as an inline selection pill whose label navigates to
-    // /plugins/<id>?plugin_detail_origin=inline_selection_pill when clicked.
-    // The user's native flow is "@OMP" -> Enter, so we only use the popup
-    // locators as evidence that a mention suggestion is open, then accept the
-    // highlighted suggestion with Enter.
-    const suggestionCandidates = () => [
-      page.getByRole("option", { name: connectorName, exact: true }),
-      page.getByRole("menuitem", { name: connectorName, exact: true }),
-      page
-        .locator(
-          '[role="listbox"] [role="option"], [role="menu"] [role="menuitem"], [data-radix-popper-content-wrapper] [data-radix-collection-item]',
-        )
-        .filter({ hasText: connectorName }),
-      page
-        .locator(
-          '[role="listbox"], [role="menu"], [data-radix-popper-content-wrapper]',
-        )
-        .filter({ hasText: connectorName }),
-    ];
-
-    // ChatGPT may lazy-load workspace apps after the @mention query appears.
-    // Wait for the popup instead of assuming it is rendered immediately.
+    // Do not click connector labels: ChatGPT can render the attached app name
+    // as an inline plugin-detail link. Instead, as soon as the visible
+    // @mention suggestion text appears anywhere outside the composer/plugin
+    // pill, accept the highlighted suggestion with Enter.
     const mentionDeadline = Date.now() + 12_000;
-    let suggestion: Locator | undefined;
-    let nextRefocusAt = Date.now() + 3_000;
+    let detected = false;
 
     while (Date.now() < mentionDeadline) {
       if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
 
-      suggestion = await firstVisible(suggestionCandidates(), 150);
-      if (suggestion) break;
-
-      // Keep the composer focused while the app list is loading. Do not
-      // rewrite the query because that can restart ChatGPT's mention lookup.
-      if (Date.now() >= nextRefocusAt) {
-        await composer.click().catch(() => undefined);
-        nextRefocusAt = Date.now() + 3_000;
+      if (await this.#mentionSuggestionVisible(page, composer, connectorName)) {
+        detected = true;
+        break;
       }
 
       const mentionText = (
         (await composer.innerText().catch(() => "")) ||
         (await composer.inputValue().catch(() => ""))
       ).trim();
+
       if (mentionText !== "@" + mentionQuery) {
         throw new Error(
           'ChatGPT @mention query changed while waiting for "' +
@@ -722,21 +738,22 @@ export class ChatGptBrowserBackend {
         );
       }
 
-      await sleep(200);
+      // Poll quickly so Enter lands almost immediately after the popup appears.
+      await sleep(50);
     }
 
-    if (!suggestion) {
+    if (!detected) {
       throw new Error(
-        'ChatGPT did not expose an @mention suggestion for "' +
+        'ChatGPT did not visibly offer "' +
           connectorName +
           '" within 12 seconds after typing "@' +
           mentionQuery +
-          '". The app list may still be loading or unavailable in this workspace.',
+          '".',
       );
     }
 
     await composer.press("Enter");
-    await sleep(500);
+    await sleep(250);
 
     const composerContainer = composer.locator(
       "xpath=ancestor::*[self::form or @data-type='unified-composer'][1]",
