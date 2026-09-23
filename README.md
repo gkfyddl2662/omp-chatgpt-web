@@ -198,6 +198,32 @@ The MCP bridge multiplexes concurrent parent/child turns by opaque
 `turn_token`. A child session releases only its own browser conversation and
 turn state when it exits.
 
+### Subagent hard limit
+
+ChatGPT Web adds a provider-side cumulative hard cap on subagent spawns because
+every Web subagent owns another ChatGPT tab. The default is **4 subagents per
+root OMP session**, including nested descendants.
+
+```text
+/web limit
+/web limit 2
+/web limit 0
+/web limit off
+/web limit default
+```
+
+- `/web limit N` allows at most `N` Web subagents for that root session.
+- `/web limit 0` blocks all Web subagent spawning.
+- `/web limit off` disables this provider hard cap.
+- `/web limit default` restores the default of 4.
+- Changing the limit does not erase the root session's already-used spawn
+  count. The counter resets when the whole root/subagent Web session family is
+  released.
+
+This is separate from OMP's own `task.maxConcurrency` and
+`task.maxRecursionDepth` controls: those govern parallelism and recursion
+depth, while the Web hard limit bounds the cumulative number of child sessions.
+
 ## Tool bridge
 
 ChatGPT sees a fixed MCP ABI instead of a permanently expanded schema for every
@@ -238,7 +264,8 @@ the built-in help and available subcommands.
 | `/web start` | Prepare the shared MCP/tunnel transport and switch the current session to `chatgpt-web/web` |
 | `/web use` | Switch the current OMP session to `chatgpt-web/web` without explicitly starting the tunnel first |
 | `/web open` | Open the dedicated browser profile for manual ChatGPT sign-in |
-| `/web status` | Show browser, MCP, tunnel, retained-session, and preparation diagnostics |
+| `/web status` | Show browser, MCP, tunnel, subagent budget, retained-session, and preparation diagnostics |
+| `/web limit [N\|off\|default]` | Show or set the cumulative Web subagent hard cap for each root session |
 | `/web tunnel` | Ensure the Secure MCP Tunnel is running |
 | `/web tunnel stop\|restart\|status` | Stop, restart, or inspect the Secure MCP Tunnel |
 | `/web config` | Show persisted provider configuration |
@@ -248,7 +275,8 @@ the built-in help and available subcommands.
 | `/web set connector <name>` | Persist the exact ChatGPT connector name |
 | `/web set browser <path>` | Persist an explicit browser executable |
 | `/web set cdp <port>` | Persist the local Chrome DevTools port |
-| `/web unset tunnel\|api\|tunnel-bin\|connector\|browser` | Clear a persisted value |
+| `/web set subagents <count>` | Persist the Web subagent hard cap (`-1`/`off` = unlimited) |
+| `/web unset tunnel\|api\|tunnel-bin\|connector\|browser\|subagents` | Clear a persisted value or restore the default subagent cap |
 
 The older `/web-open`, `/web-use`, `/web-status`, `/web-tunnel`, and
 `/web-config` commands remain available as compatibility aliases.
@@ -270,6 +298,7 @@ Start with:
 - number of tabs and retained Web sessions
 - active turns and pending compactions
 - shared root/subagent Web session count
+- current root-session subagent usage and hard limit
 - latest prompt preparation timings
 
 If OMP reports that `tunnel-client` cannot be found after a restart, persist
