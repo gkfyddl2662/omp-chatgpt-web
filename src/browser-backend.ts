@@ -668,21 +668,40 @@ export class ChatGptBrowserBackend {
       await sleep(150);
     }
 
+    // Never click the connector label globally. ChatGPT renders the already
+    // attached app as an inline selection pill whose label navigates to
+    // /plugins/<id>?plugin_detail_origin=inline_selection_pill when clicked.
+    // The user's native flow is "@OMP" -> Enter, so we only use the popup
+    // locators as evidence that a mention suggestion is open, then accept the
+    // highlighted suggestion with Enter.
     const suggestion = await firstVisible(
       [
         page.getByRole("option", { name: connectorName, exact: true }),
         page.getByRole("menuitem", { name: connectorName, exact: true }),
-        page.getByRole("button", { name: connectorName, exact: true }),
-        page.getByText(connectorName, { exact: true }),
+        page
+          .locator(
+            '[role="listbox"] [role="option"], [role="menu"] [role="menuitem"], [data-radix-popper-content-wrapper] [data-radix-collection-item]',
+          )
+          .filter({ hasText: connectorName }),
       ],
-      2_000,
+      2_500,
     );
 
-    if (suggestion) {
-      await suggestion.click();
-    } else {
-      await page.keyboard.press("Enter");
+    if (!suggestion) {
+      throw new Error(
+        'ChatGPT did not expose an @mention suggestion for "' +
+          connectorName +
+          '" after typing "@' +
+          mentionQuery +
+          '". Open ChatGPT manually and verify that "@' +
+          mentionQuery +
+          '" shows "' +
+          connectorName +
+          '".',
+      );
     }
+
+    await composer.press("Enter");
     await sleep(300);
 
     const composerContainer = composer.locator(
@@ -712,7 +731,7 @@ export class ChatGptBrowserBackend {
         throw new Error(
           'ChatGPT app "' +
             connectorName +
-            '" suggestion was clicked but the mention did not attach to the composer.',
+            '" suggestion was accepted but the mention did not attach to the composer.',
         );
       }
     }
