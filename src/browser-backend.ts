@@ -44,6 +44,7 @@ export class ChatGptBrowserBackend {
   #context?: BrowserContext;
   readonly #turns = new Map<string, BrowserTurn>();
   readonly #sessions = new Map<string, BrowserSession>();
+  readonly #reservedPages = new Set<Page>();
 
   async openLogin(config: RuntimeConfig): Promise<void> {
     if (!config.browserExecutable) {
@@ -146,12 +147,16 @@ export class ChatGptBrowserBackend {
       this.#context = undefined;
       this.#turns.clear();
       this.#sessions.clear();
+      this.#reservedPages.clear();
     });
 
     return context;
   }
 
   #pruneClosedSessions(): void {
+    for (const page of this.#reservedPages) {
+      if (page.isClosed()) this.#reservedPages.delete(page);
+    }
     for (const [key, session] of this.#sessions) {
       if (session.page.isClosed()) this.#sessions.delete(key);
     }
@@ -171,22 +176,26 @@ export class ChatGptBrowserBackend {
         const context = await this.#connect(config);
         this.#pruneClosedSessions();
 
-        const ownedPages = new Set(
-          [...this.#sessions.values()]
+        const ownedPages = new Set([
+          ...[...this.#sessions.values()]
             .map(session => session.page)
             .filter(page => !page.isClosed()),
-        );
+          ...[...this.#reservedPages].filter(page => !page.isClosed()),
+        ]);
         const idlePages = context.pages().filter(
           page => !page.isClosed() && !ownedPages.has(page),
         );
 
         const reusable = idlePages[0];
         if (reusable) {
+          this.#reservedPages.add(reusable);
           await Promise.allSettled(idlePages.slice(1).map(page => page.close()));
           return reusable;
         }
 
-        return await context.newPage();
+        const created = await context.newPage();
+        this.#reservedPages.add(created);
+        return created;
       } catch (error) {
         lastError = error;
         this.#browser = undefined;
@@ -235,6 +244,7 @@ export class ChatGptBrowserBackend {
       await this.#navigateFreshChat(page, config);
       return page;
     } catch (error) {
+      this.#reservedPages.delete(page);
       await page.close().catch(() => undefined);
       throw error;
     }
@@ -263,6 +273,7 @@ export class ChatGptBrowserBackend {
       lastUsedAt: Date.now(),
     };
     this.#sessions.set(sessionKey, session);
+    this.#reservedPages.delete(page);
     return session;
   }
 
@@ -533,6 +544,7 @@ export class ChatGptBrowserBackend {
         baselineAssistants,
       );
     } finally {
+      this.#reservedPages.delete(page);
       await page.close().catch(() => undefined);
     }
   }
@@ -562,6 +574,7 @@ export class ChatGptBrowserBackend {
     }
     this.#turns.clear();
     this.#sessions.clear();
+    this.#reservedPages.clear();
 
     const browser = this.#browser;
     this.#browser = undefined;
