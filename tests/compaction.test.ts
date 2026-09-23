@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Context } from "@oh-my-pi/pi-ai";
 import {
+  assertValidCompactionSummary,
   compileCompactionPrompt,
   compileRetainedCompactionPrompt,
   isOmpCompactionContext,
@@ -89,4 +90,45 @@ test("retained compaction uses the existing ChatGPT thread instead of replaying 
   assert.match(prompt, /conversation history already present/);
   assert.doesNotMatch(prompt, /very large retained history/);
   assert.match(prompt, /Summarize that retained conversation/);
+});
+
+
+test("compaction summary validation rejects ChatGPT error pages", () => {
+  assert.throws(
+    () => assertValidCompactionSummary(
+      "Something went wrong. If this issue persists please contact us through our help center at help.openai.com. 다시 시도",
+    ),
+    /browser\/server error/,
+  );
+  assert.throws(
+    () => assertValidCompactionSummary("문제가 발생했습니다. 다시 시도"),
+    /browser\/server error/,
+  );
+});
+
+test("compaction summary validation rejects maintenance prompt echoes", () => {
+  assert.throws(
+    () => assertValidCompactionSummary(
+      "OMP COMPACTION SYSTEM INSTRUCTIONS\n" +
+      "Summarize user–AI coding-assistant conversations...",
+    ),
+    /echoed the maintenance prompt/,
+  );
+});
+
+test("compaction summary validation accepts an actual compacted handoff", () => {
+  const summary = [
+    "Current state: retained browser compaction is being repaired.",
+    "Important files: src/provider.ts and src/browser-backend.ts.",
+    "Next step: run CI and verify failure remains fail-closed.",
+  ].join("\n");
+  assert.equal(assertValidCompactionSummary(summary), summary);
+});
+
+test("compaction summary validation rejects large source-prompt replay", () => {
+  const source = "HEADER " + "exact retained context ".repeat(400) + " TAIL";
+  assert.throws(
+    () => assertValidCompactionSummary(source, source),
+    /echoed the source prompt/,
+  );
 });
