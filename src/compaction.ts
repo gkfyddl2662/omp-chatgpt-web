@@ -67,3 +67,39 @@ export function compileCompactionPrompt(context: Context): string {
     messages || "(none)",
   ].join("\n");
 }
+
+
+function stripEmbeddedConversation(text: string): string {
+  return text.replace(
+    /<conversation>[\s\S]*?<\/conversation>/g,
+    [
+      "<conversation>",
+      "[The full source conversation is already present in this retained ChatGPT thread.",
+      "Summarize that retained conversation instead of expecting it to be repeated here.]",
+      "</conversation>",
+    ].join("\n"),
+  );
+}
+
+export function compileRetainedCompactionPrompt(context: Context): string {
+  const system = (context.systemPrompt ?? []).join("\n\n").trim();
+  const userMessages = context.messages
+    .filter(message => message.role === "user")
+    .map(message => textContent(message.content))
+    .filter(Boolean);
+  const request = stripEmbeddedConversation(userMessages[userMessages.length - 1] ?? "");
+
+  return [
+    "This is an OMP context-compaction request for the SAME ChatGPT conversation you have been using as the model backend.",
+    "Use the conversation history already present in this ChatGPT thread as the source to compact.",
+    "Do not perform the coding task itself.",
+    "Do not call apps, MCP, web search, files, or any other tools for this compaction message.",
+    "Return ONLY the requested compacted summary/handoff text.",
+    "",
+    "OMP COMPACTION SYSTEM INSTRUCTIONS",
+    system || "(none)",
+    "",
+    "OMP COMPACTION REQUEST",
+    request || "Summarize the retained conversation according to the OMP compaction system instructions above.",
+  ].join("\n");
+}
