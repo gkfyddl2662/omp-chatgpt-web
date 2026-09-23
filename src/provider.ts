@@ -244,29 +244,38 @@ export class WebModelProvider {
       if (isOmpCompactionContext(context, options)) {
         try {
           let summary: string;
-          const activeTurn = this.#broker.hasActive(request) || this.#browser.isTurnActive(conversation);
 
-          if (this.#browser.hasRetainedConversation(conversation) && !activeTurn) {
-            summary = await this.#browser.compactRetainedSession(
-              conversation,
-              compileRetainedCompactionPrompt(context),
-              this.#config,
-              signal,
-            );
+          if (this.#browser.hasSession(conversation)) {
+            // Never open a second compaction tab while the retained ChatGPT
+            // conversation is still active. Let the foreground browser turn
+            // finish, then compact that exact retained thread.
+            if (this.#browser.isTurnActive(conversation)) {
+              await this.#browser.waitForTurnIdle(conversation, signal);
+            }
+
+            if (this.#browser.hasRetainedConversation(conversation)) {
+              summary = await this.#browser.compactRetainedSession(
+                conversation,
+                compileRetainedCompactionPrompt(context),
+                this.#config,
+                signal,
+              );
+            } else {
+              // The retained session disappeared while we were waiting (for
+              // example, browser closure or a failed turn). Only then fall back
+              // to a standalone text-only compaction request.
+              summary = await this.#browser.runTextOnly(
+                compileCompactionPrompt(context),
+                this.#config,
+                signal,
+              );
+            }
           } else {
             summary = await this.#browser.runTextOnly(
               compileCompactionPrompt(context),
               this.#config,
               signal,
             );
-
-            if (this.#browser.hasSession(conversation)) {
-              if (activeTurn) {
-                await this.#browser.markResetAfterTurn(conversation);
-              } else {
-                await this.#browser.resetSession(conversation, this.#config);
-              }
-            }
           }
 
           pushText(stream, model, summary);
