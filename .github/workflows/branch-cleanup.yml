@@ -1,0 +1,20 @@
+name: One-time branch cleanup
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete superseded development branches
+        shell: bash
+        run: |
+          for branch in preview feat/web-agent-harness feat/bootstrap-native-mcp; do
+            git push origin --delete "$branch" || true
+          done
