@@ -6,6 +6,7 @@ export const WEB_CONFIG_KEYS = [
   "browser",
   "cdp",
   "subagents",
+  "insert",
 ] as const;
 
 export const WEB_CLEARABLE_KEYS = [
@@ -15,6 +16,7 @@ export const WEB_CLEARABLE_KEYS = [
   "connector",
   "browser",
   "subagents",
+  "insert",
 ] as const;
 
 export type WebConfigKey = (typeof WEB_CONFIG_KEYS)[number];
@@ -93,7 +95,8 @@ export const WEB_HELP_TEXT = [
   "  /web set browser <path>",
   "  /web set cdp <port>",
   "  /web set subagents <count>",
-  "  /web unset tunnel|api|tunnel-bin|connector|browser|subagents",
+  "  /web set insert default|lexical",
+  "  /web unset tunnel|api|tunnel-bin|connector|browser|subagents|insert",
 ].join("\n");
 
 function splitHead(raw: string): { head: string; tail: string } {
@@ -165,7 +168,7 @@ export function parseWebCommand(raw: string): WebCommand {
     if (!key || !value) {
       return {
         kind: "invalid",
-        message: "Usage: /web set tunnel|api|tunnel-bin|connector|browser|cdp|subagents <value>",
+        message: "Usage: /web set tunnel|api|tunnel-bin|connector|browser|cdp|subagents|insert <value>",
       };
     }
     if (!isConfigKey(key)) {
@@ -182,7 +185,7 @@ export function parseWebCommand(raw: string): WebCommand {
     if (!key || key.includes(" ")) {
       return {
         kind: "invalid",
-        message: "Usage: /web unset tunnel|api|tunnel-bin|connector|browser|subagents",
+        message: "Usage: /web unset tunnel|api|tunnel-bin|connector|browser|subagents|insert",
       };
     }
     if (!isClearableKey(key)) {
