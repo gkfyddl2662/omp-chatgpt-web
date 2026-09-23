@@ -674,35 +674,69 @@ export class ChatGptBrowserBackend {
     // The user's native flow is "@OMP" -> Enter, so we only use the popup
     // locators as evidence that a mention suggestion is open, then accept the
     // highlighted suggestion with Enter.
-    const suggestion = await firstVisible(
-      [
-        page.getByRole("option", { name: connectorName, exact: true }),
-        page.getByRole("menuitem", { name: connectorName, exact: true }),
-        page
-          .locator(
-            '[role="listbox"] [role="option"], [role="menu"] [role="menuitem"], [data-radix-popper-content-wrapper] [data-radix-collection-item]',
-          )
-          .filter({ hasText: connectorName }),
-      ],
-      2_500,
-    );
+    const suggestionCandidates = () => [
+      page.getByRole("option", { name: connectorName, exact: true }),
+      page.getByRole("menuitem", { name: connectorName, exact: true }),
+      page
+        .locator(
+          '[role="listbox"] [role="option"], [role="menu"] [role="menuitem"], [data-radix-popper-content-wrapper] [data-radix-collection-item]',
+        )
+        .filter({ hasText: connectorName }),
+      page
+        .locator(
+          '[role="listbox"], [role="menu"], [data-radix-popper-content-wrapper]',
+        )
+        .filter({ hasText: connectorName }),
+    ];
+
+    // ChatGPT may lazy-load workspace apps after the @mention query appears.
+    // Wait for the popup instead of assuming it is rendered immediately.
+    const mentionDeadline = Date.now() + 12_000;
+    let suggestion: Locator | undefined;
+    let nextRefocusAt = Date.now() + 3_000;
+
+    while (Date.now() < mentionDeadline) {
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+
+      suggestion = await firstVisible(suggestionCandidates(), 150);
+      if (suggestion) break;
+
+      // Keep the composer focused while the app list is loading. Do not
+      // rewrite the query because that can restart ChatGPT's mention lookup.
+      if (Date.now() >= nextRefocusAt) {
+        await composer.click().catch(() => undefined);
+        nextRefocusAt = Date.now() + 3_000;
+      }
+
+      const mentionText = (
+        (await composer.innerText().catch(() => "")) ||
+        (await composer.inputValue().catch(() => ""))
+      ).trim();
+      if (mentionText !== "@" + mentionQuery) {
+        throw new Error(
+          'ChatGPT @mention query changed while waiting for "' +
+            connectorName +
+            '": "' +
+            mentionText +
+            '"',
+        );
+      }
+
+      await sleep(200);
+    }
 
     if (!suggestion) {
       throw new Error(
         'ChatGPT did not expose an @mention suggestion for "' +
           connectorName +
-          '" after typing "@' +
+          '" within 12 seconds after typing "@' +
           mentionQuery +
-          '". Open ChatGPT manually and verify that "@' +
-          mentionQuery +
-          '" shows "' +
-          connectorName +
-          '".',
+          '". The app list may still be loading or unavailable in this workspace.',
       );
     }
 
     await composer.press("Enter");
-    await sleep(300);
+    await sleep(500);
 
     const composerContainer = composer.locator(
       "xpath=ancestor::*[self::form or @data-type='unified-composer'][1]",
