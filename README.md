@@ -147,11 +147,46 @@ uses ChatGPT Web for model inference. When ChatGPT needs a tool it calls the
 `OMP Local` connector; the bridge returns a native OMP ToolCall, so OMP runs
 the actual tool and sends its result back into the same Web response.
 
+## Task agents and subagents
+
+When the parent OMP session is using `chatgpt-web/web`, the extension's
+`before_subagent_spawn` hook routes task/eval subagents through
+`chatgpt-web/web` as well. This overrides bundled agent defaults such as
+`scout`'s `@smol` model route for that spawn.
+
+Parent and child sessions share one process-level Web runtime:
+
+```text
+OMP root session --------> ChatGPT Temporary Chat tab A
+       |
+       +-- task/scout ---> ChatGPT Temporary Chat tab B
+       |
+       +-- task/review --> ChatGPT Temporary Chat tab C
+                              |
+                              v
+                    one shared OMP Local MCP
+                    one shared Secure MCP Tunnel
+                    one shared Chrome/CDP context
+```
+
+The MCP listener, tunnel supervisor, browser backend, and turn broker are
+module-level singletons. The broker multiplexes simultaneous parent/child turns
+by the opaque `turn_token` included in every MCP call, while the browser backend
+owns a separate page for each OMP provider conversation/session. A child
+session shutting down releases only its own active requests and browser
+conversation; the shared MCP/tunnel/browser runtime is closed only after the
+last bound OMP session exits.
+
+This is still not an outer subagent adapter: OMP owns task spawning, child
+sessions, tool policy, and lifecycle. ChatGPT Web is simply the model provider
+used by those child agent loops too.
+
 ## Context compaction
 
-The browser backend now retains **one ChatGPT conversation tab per OMP provider
+The browser backend retains **one ChatGPT Temporary Chat tab per OMP provider
 session**, following the retained-conversation ownership pattern used by
-`codex-chatgpt-web`.
+`codex-chatgpt-web`. Temporary Chat is intentional: retained turns reuse the
+live in-memory page and are never reloaded/rehydrated between turns.
 
 Ordinary OMP model turns therefore do not create a fresh ChatGPT conversation
 every time:
