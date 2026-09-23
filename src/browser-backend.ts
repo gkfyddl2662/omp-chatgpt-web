@@ -742,9 +742,10 @@ export class ChatGptBrowserBackend {
     }, text).catch(() => false);
 
     if (!inserted) {
-      throw new Error(
-        "ChatGPT composer rejected the single-operation prompt insertion.",
-      );
+      // execCommand reported that it performed no edit, so a native CDP
+      // insertion is still safe here: there is nothing to duplicate.
+      await composer.focus();
+      await _page.keyboard.insertText(text);
     }
 
     const actual = await this.#composerPlainText(composer);
