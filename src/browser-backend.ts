@@ -275,31 +275,40 @@ export class ChatGptBrowserBackend {
   }
 
   async #releasePageWithoutStoppingBrowser(page: Page): Promise<void> {
-    this.#reservedPages.delete(page);
-    if (page.isClosed()) return;
-
-    const context = this.#context;
-    const hasOtherOpenPage = Boolean(
-      context?.pages().some(candidate =>
-        candidate !== page && !candidate.isClosed()
-      ),
-    );
-
-    if (hasOtherOpenPage) {
-      await page.close().catch(() => undefined);
+    if (page.isClosed()) {
+      this.#reservedPages.delete(page);
       return;
     }
 
-    // Closing Chrome's final tab can tear down the whole dedicated automation
-    // browser. Retire the stale/transient surface to about:blank instead so
-    // the process stays warm and the next request can reuse this page.
+    // Keep ownership while the page is being retired so another concurrent
+    // request cannot acquire it as an idle page halfway through navigation.
+    this.#reservedPages.add(page);
     try {
-      await page.goto("about:blank", {
-        waitUntil: "domcontentloaded",
-        timeout: 5_000,
-      });
-    } catch {
-      await page.close().catch(() => undefined);
+      const context = this.#context;
+      const hasOtherOpenPage = Boolean(
+        context?.pages().some(candidate =>
+          candidate !== page && !candidate.isClosed()
+        ),
+      );
+
+      if (hasOtherOpenPage) {
+        await page.close().catch(() => undefined);
+        return;
+      }
+
+      // Closing Chrome's final tab can tear down the whole dedicated automation
+      // browser. Retire the stale/transient surface to about:blank instead so
+      // the process stays warm and the next request can reuse this page.
+      try {
+        await page.goto("about:blank", {
+          waitUntil: "domcontentloaded",
+          timeout: 5_000,
+        });
+      } catch {
+        await page.close().catch(() => undefined);
+      }
+    } finally {
+      this.#reservedPages.delete(page);
     }
   }
 
