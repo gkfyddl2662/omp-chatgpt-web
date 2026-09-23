@@ -1,6 +1,11 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ChatGptBrowserBackend } from "../../src/browser-backend.js";
-import { loadRuntimeConfig, tunnelConfigured } from "../../src/config.js";
+import {
+  applyRuntimeConfigPatch,
+  loadRuntimeConfig,
+  persistentConfigPath,
+  tunnelConfigured,
+} from "../../src/config.js";
 import { createMcpServer, type McpServerHandle } from "../../src/mcp-server.js";
 import { WebModelProvider } from "../../src/provider.js";
 import { TurnBroker } from "../../src/turn-broker.js";
@@ -68,6 +73,115 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
       maxTokens: 32_000,
       preferWebsockets: false,
     }],
+  });
+
+  pi.registerCommand("web-config", {
+    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | connector <name> | browser <path> | cdp <port> | clear <key>",
+    handler: async (args, ctx) => {
+      try {
+        const trimmed = args.trim();
+        const firstSpace = trimmed.indexOf(" ");
+        const action = (firstSpace >= 0 ? trimmed.slice(0, firstSpace) : trimmed).toLowerCase();
+        const value = firstSpace >= 0 ? trimmed.slice(firstSpace + 1).trim() : "";
+
+        const show = () => {
+          const maskedApi = config.tunnelApiKey
+            ? config.tunnelApiKey.slice(0, Math.min(5, config.tunnelApiKey.length)) + "..." +
+              config.tunnelApiKey.slice(-4)
+            : "(not set)";
+          ctx.ui.notify(
+            [
+              "OMP ChatGPT Web config",
+              "file: " + persistentConfigPath(),
+              "tunnel: " + (config.tunnelId || "(not set)"),
+              "api: " + maskedApi,
+              "connector: " + config.connectorName,
+              "browser: " + (config.browserExecutable || "(auto)"),
+              "cdp: " + config.browserCdpPort,
+            ].join("\n"),
+            "info",
+          );
+        };
+
+        if (!action || action === "show") {
+          show();
+          return;
+        }
+
+        if (action === "clear") {
+          const key = value.toLowerCase();
+          if (key === "api") {
+            applyRuntimeConfigPatch(config, { tunnelApiKey: "" });
+          } else if (key === "tunnel") {
+            applyRuntimeConfigPatch(config, { tunnelId: "" });
+          } else if (key === "connector") {
+            applyRuntimeConfigPatch(config, { connectorName: "" });
+          } else if (key === "browser") {
+            applyRuntimeConfigPatch(config, { browserExecutable: "" });
+          } else {
+            ctx.ui.notify("Usage: /web-config clear api|tunnel|connector|browser", "warning");
+            return;
+          }
+          if (key === "api" || key === "tunnel") {
+            await tunnel.stop(config).catch(() => undefined);
+          }
+          ctx.ui.notify("Cleared web config: " + key, "info");
+          return;
+        }
+
+        if (!value) {
+          ctx.ui.notify(
+            "Usage: /web-config show | tunnel <id> | api <key> | connector <name> | browser <path> | cdp <port> | clear <key>",
+            "warning",
+          );
+          return;
+        }
+
+        if (action === "tunnel") {
+          applyRuntimeConfigPatch(config, { tunnelId: value });
+          await tunnel.stop(config).catch(() => undefined);
+          ctx.ui.notify("Saved Secure MCP Tunnel ID.", "info");
+          return;
+        }
+
+        if (action === "api") {
+          applyRuntimeConfigPatch(config, { tunnelApiKey: value });
+          await tunnel.stop(config).catch(() => undefined);
+          ctx.ui.notify("Saved Secure MCP Tunnel runtime API key.", "info");
+          return;
+        }
+
+        if (action === "connector") {
+          applyRuntimeConfigPatch(config, { connectorName: value });
+          ctx.ui.notify('Saved ChatGPT connector name: "' + value + '"', "info");
+          return;
+        }
+
+        if (action === "browser") {
+          applyRuntimeConfigPatch(config, { browserExecutable: value });
+          ctx.ui.notify("Saved browser executable path.", "info");
+          return;
+        }
+
+        if (action === "cdp") {
+          const port = Number(value);
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            ctx.ui.notify("CDP port must be an integer from 1 to 65535.", "warning");
+            return;
+          }
+          applyRuntimeConfigPatch(config, { browserCdpPort: port });
+          ctx.ui.notify("Saved Chrome CDP port: " + port, "info");
+          return;
+        }
+
+        ctx.ui.notify(
+          "Unknown web-config key. Use: show | tunnel | api | connector | browser | cdp | clear",
+          "warning",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
   });
 
   pi.registerCommand("web-open", {
