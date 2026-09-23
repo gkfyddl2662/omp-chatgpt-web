@@ -215,12 +215,17 @@ retained browser session exists, compaction:
 
 New ordinary turns wait behind this boundary.
 
-A standalone text-only Temporary Chat is only a fallback when there is no
-usable retained browser conversation, for example after browser/session loss.
-It uses the same direct-editor insertion strategy and explicitly verifies that
-the OMP connector is not attached.
+There is no standalone full-history compaction fallback. If the retained
+conversation is unavailable or invalid, the provider returns an error so OMP
+does not commit a destructive compaction from an untrusted response.
 
-Page retirement is last-tab safe: when a stale/transient page is Chrome's only
+Before a retained compaction can succeed, the backend checks ChatGPT's visible
+error/retry UI and validates the returned text. Browser/server error text,
+maintenance-prompt echoes, and large source-prompt replays are rejected.
+ChatGPT's Retry action may be attempted once on the same submitted compaction;
+if it still fails, the compaction fails.
+
+Page retirement remains last-tab safe: when a stale page is Chrome's only
 remaining page, the backend navigates it to `about:blank` rather than closing
 it. That keeps the dedicated CDP browser alive for the next provider request.
 
@@ -317,8 +322,9 @@ Completions API as an inference fallback.
 ## Known integration limits
 
 - ChatGPT composer and Apps selectors can change without notice.
-- If direct ProseMirror/Lexical discovery fails, insertion falls back to older
-  contenteditable/CDP paths and very large prompts can become slower.
+- If direct ProseMirror/Lexical discovery fails, ordinary insertion falls back
+  to older contenteditable/CDP paths. Retained compaction fails closed rather
+  than replaying the full history in a fresh tab.
 - ChatGPT Web does not expose authoritative token accounting through this
   browser route, so provider usage remains zero.
 - The provider is text-only.
