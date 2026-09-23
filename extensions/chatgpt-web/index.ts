@@ -275,7 +275,15 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         }
         const diagnostics = await tunnel.diagnostics(config);
         ctx.ui.notify(
-          JSON.stringify({ ...diagnostics, mcp: server.url }, null, 2),
+          JSON.stringify(
+            {
+              ...diagnostics,
+              mcp: server.url,
+              mcpTrace: server.trace(),
+            },
+            null,
+            2,
+          ),
           diagnostics.ready ? "info" : "warning",
         );
       } catch (error) {
