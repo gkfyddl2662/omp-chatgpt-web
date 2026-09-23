@@ -95,7 +95,7 @@ export const WEB_HELP_TEXT = [
   "  /web set browser <path>",
   "  /web set cdp <port>",
   "  /web set subagents <count>",
-  "  /web set insert default|editor",
+  "  /web set insert default|editor   editor is the normal default; default bypasses direct-editor probing",
   "  /web unset tunnel|api|tunnel-bin|connector|browser|subagents|insert",
 ].join("\n");
 
@@ -264,8 +264,8 @@ export function getWebArgumentCompletions(argumentPrefix: string): WebCommandCom
       return filterCompletions(
         valuePrefix,
         [
-          { name: "default", description: "Use the normal execCommand/CDP insertion path" },
-          { name: "editor", description: "Use a direct ProseMirror/Lexical editor transaction when available" },
+          { name: "default", description: "Bypass direct-editor probing and use execCommand/CDP" },
+          { name: "editor", description: "Use the default ProseMirror/Lexical direct-editor path with fallback" },
         ],
         "set insert ",
       );
