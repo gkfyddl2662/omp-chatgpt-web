@@ -633,6 +633,12 @@ export class ChatGptBrowserBackend {
     );
   }
 
+  async #composerPlainText(composer: Locator): Promise<string> {
+    const value = await composer.inputValue().catch(() => undefined);
+    if (typeof value === "string") return value;
+    return await composer.innerText().catch(() => "");
+  }
+
   async #insertComposerText(
     page: Page,
     composer: Locator,
@@ -640,40 +646,60 @@ export class ChatGptBrowserBackend {
   ): Promise<void> {
     await composer.focus();
 
-    try {
-      // Playwright maps this to CDP Input.insertText: one native text insertion
-      // regardless of prompt length. It preserves the already-attached app
-      // mention and avoids the DOM mutation/reconciliation cost of execCommand.
-      await page.keyboard.insertText(text);
-      return;
-    } catch {
-      // Keep a content-preserving fallback. The prompt string is unchanged.
-      await composer.evaluate((element, value) => {
-        const el = element as HTMLElement;
-        el.focus();
+    // Fast path: update the editable DOM in one mutation and emit exactly one
+    // input event. This keeps the prompt text unchanged while avoiding the
+    // multi-second per-character/editor reconciliation cost observed with
+    // CDP Input.insertText on very large OMP prompts.
+    const before = await this.#composerPlainText(composer);
+    const expected = before + text;
 
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(false);
-        selection?.removeAllRanges();
-        selection?.addRange(range);
+    const fastApplied = await composer.evaluate((element, value) => {
+      const el = element as HTMLElement;
+      el.focus();
 
-        const inserted = document.execCommand("insertText", false, String(value));
-        if (!inserted) {
-          const node = document.createTextNode(String(value));
-          range.insertNode(node);
-          range.setStartAfter(node);
-          range.collapse(true);
-          selection?.removeAllRanges();
-          selection?.addRange(range);
-          el.dispatchEvent(new InputEvent("input", {
-            bubbles: true,
-            inputType: "insertText",
-            data: String(value),
-          }));
-        }
-      }, text);
+      // Preserve existing mention/pill DOM. Append one text node after it.
+      const node = document.createTextNode(String(value));
+      el.appendChild(node);
+
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.setStartAfter(node);
+      range.collapse(true);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+
+      el.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "insertText",
+        data: String(value),
+      }));
+
+      return true;
+    }, text).catch(() => false);
+
+    if (fastApplied) {
+      // Give ChatGPT/Lexical one frame to reconcile, then verify the exact
+      // visible composer text before allowing submission.
+      await page.evaluate(() => new Promise<void>(resolve =>
+        requestAnimationFrame(() => resolve())
+      )).catch(() => undefined);
+
+      const actual = await this.#composerPlainText(composer);
+      if (actual === expected) return;
+    }
+
+    // Compatibility fallback: the current ChatGPT editor rejected or rewrote
+    // the direct DOM mutation. Use the native CDP text insertion path.
+    await composer.focus();
+    await page.keyboard.insertText(text);
+
+    const actual = await this.#composerPlainText(composer);
+    if (actual !== expected) {
+      throw new Error(
+        "ChatGPT composer text changed during prompt insertion " +
+          "(expected " + expected.length + " chars, got " + actual.length + ").",
+      );
     }
   }
 
