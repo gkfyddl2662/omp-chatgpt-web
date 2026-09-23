@@ -723,7 +723,6 @@ export class ChatGptBrowserBackend {
   ): Promise<void> {
     await composer.focus();
     const before = await this.#composerPlainText(composer);
-    const expected = before + text;
 
     // One browser editing operation, with no manually-dispatched InputEvent.
     // ChatGPT/Lexical receives the same prompt string unchanged.
