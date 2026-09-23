@@ -42,9 +42,10 @@ interface BrowserSession {
 interface BrowserPreparationTiming {
   promptChars: number;
   sessionMs: number;
+  rehydrateMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "windows-paste" | "execCommand" | "cdp";
+  insertMode: "execCommand" | "cdp";
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -376,6 +377,43 @@ export class ChatGptBrowserBackend {
     ]);
   }
 
+  #canRehydrateRetainedPage(page: Page): boolean {
+    try {
+      const url = new URL(page.url());
+      if (url.origin !== "https://chatgpt.com") return false;
+
+      // Only reload a URL that visibly identifies an existing conversation.
+      // Never reload the generic Temporary Chat entrypoint because that may
+      // create a new empty temporary conversation and lose retained context.
+      return /^\/c\/[^/?#]+(?:\/|$)/.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  async #rehydrateRetainedPage(
+    session: BrowserSession,
+  ): Promise<boolean> {
+    if (!session.seeded || !this.#canRehydrateRetainedPage(session.page)) {
+      return false;
+    }
+
+    const urlBefore = session.page.url();
+    await session.page.reload({
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+    await this.#requireComposer(session.page);
+
+    if (session.page.url() !== urlBefore) {
+      throw new Error(
+        "ChatGPT changed the retained conversation URL during background rehydration.",
+      );
+    }
+
+    return true;
+  }
+
   async startTurn(
     sessionKey: string,
     prompt: string,
@@ -395,6 +433,15 @@ export class ChatGptBrowserBackend {
       await this.#resetSessionPage(sessionKey, config);
     }
     const sessionReadyAt = Date.now();
+
+    // Retained ChatGPT pages can accumulate expensive frontend/editor state.
+    // If this is a real /c/<id> conversation URL, reload that SAME conversation
+    // in the background before the next turn. Generic temporary-chat URLs are
+    // deliberately left untouched to avoid losing the retained thread.
+    if (session.seeded) {
+      await this.#rehydrateRetainedPage(session);
+    }
+    const rehydratedAt = Date.now();
 
     const page = session.page;
     let composer: Locator;
@@ -427,7 +474,6 @@ export class ChatGptBrowserBackend {
         page,
         composer,
         " " + prompt,
-        config.browserCdpPort,
       );
       const insertedAt = Date.now();
       await composer.press("Enter");
@@ -436,7 +482,8 @@ export class ChatGptBrowserBackend {
       this.#lastPreparation = {
         promptChars: prompt.length,
         sessionMs: sessionReadyAt - preparationStartedAt,
-        mentionMs: mentionReadyAt - sessionReadyAt,
+        rehydrateMs: rehydratedAt - sessionReadyAt,
+        mentionMs: mentionReadyAt - rehydratedAt,
         insertMs: insertedAt - mentionReadyAt,
         insertMode: insertion.mode,
         insertEditMs: insertion.editMs,
@@ -776,278 +823,22 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #prepareClipboardPrompt(
-    page: Page,
-    text: string,
-  ): Promise<boolean> {
-    const origin = new URL(page.url()).origin;
-    if (origin !== "https://chatgpt.com") return false;
-
-    try {
-      await page.context().grantPermissions(
-        ["clipboard-read", "clipboard-write"],
-        { origin },
-      );
-    } catch {
-      return false;
-    }
-
-    return await page.evaluate(async value => {
-      type StoredPart = {
-        type: string;
-        data: ArrayBuffer;
-      };
-      type StoredItem = StoredPart[];
-      const scope = globalThis as typeof globalThis & {
-        __OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__?: StoredItem[];
-      };
-
-      try {
-        const original = await navigator.clipboard.read();
-        const stored: StoredItem[] = [];
-        let totalBytes = 0;
-
-        for (const item of original) {
-          const parts: StoredItem = [];
-          for (const type of item.types) {
-            if (
-              typeof ClipboardItem === "undefined" ||
-              !ClipboardItem.supports(type)
-            ) {
-              return false;
-            }
-            const blob = await item.getType(type);
-            totalBytes += blob.size;
-            if (totalBytes > 8 * 1024 * 1024) return false;
-            parts.push({
-              type,
-              data: await blob.arrayBuffer(),
-            });
-          }
-          stored.push(parts);
-        }
-
-        scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__ = stored;
-
-        const escaped = String(value)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;");
-
-        const payload = new ClipboardItem({
-          "text/plain": new Blob(
-            [String(value)],
-            { type: "text/plain" },
-          ),
-          "text/html": new Blob(
-            ['<pre style="white-space:pre-wrap">' + escaped + "</pre>"],
-            { type: "text/html" },
-          ),
-        });
-        await navigator.clipboard.write([payload]);
-        return true;
-      } catch {
-        delete scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
-        return false;
-      }
-    }, text).catch(() => false);
-  }
-
-  async #restoreClipboardPrompt(
-    page: Page,
-    text: string,
-  ): Promise<void> {
-    await page.evaluate(async expected => {
-      type StoredPart = {
-        type: string;
-        data: ArrayBuffer;
-      };
-      type StoredItem = StoredPart[];
-      const scope = globalThis as typeof globalThis & {
-        __OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__?: StoredItem[];
-      };
-      const backup = scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
-      delete scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
-      if (!backup) return;
-
-      try {
-        const current = await navigator.clipboard.readText();
-        if (
-          current.replace(/\r\n?/g, "\n") !==
-          String(expected).replace(/\r\n?/g, "\n")
-        ) {
-          return;
-        }
-
-        if (backup.length === 0) {
-          await navigator.clipboard.writeText("");
-          return;
-        }
-
-        const restored = backup.map(parts => new ClipboardItem(
-          Object.fromEntries(
-            parts.map(part => [
-              part.type,
-              new Blob([part.data], { type: part.type }),
-            ]),
-          ),
-        ));
-        await navigator.clipboard.write(restored);
-      } catch {
-        // Best-effort restore. Never overwrite clipboard content that changed
-        // while the native paste was in flight.
-      }
-    }, text).catch(() => undefined);
-  }
-
-  async #windowsNativePaste(
-    page: Page,
-    composer: Locator,
-    text: string,
-    browserCdpPort: number,
-    before: string,
-  ): Promise<{ editMs: number; verifyMs: number } | undefined> {
-    if (process.platform !== "win32") return undefined;
-    if (!(await this.#prepareClipboardPrompt(page, text))) return undefined;
-
-    const editStartedAt = Date.now();
-
-    try {
-      await page.bringToFront();
-      await composer.focus();
-      await composer.evaluate(element => {
-        if (!(element instanceof HTMLElement)) return;
-        const selection = window.getSelection();
-        if (!selection) return;
-        const range = document.createRange();
-        range.selectNodeContents(element);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      });
-
-      const script = [
-        "Add-Type -AssemblyName System.Windows.Forms",
-        "Add-Type -TypeDefinition @'",
-        "using System;",
-        "using System.Runtime.InteropServices;",
-        "public static class OmpNativePaste {",
-        "  [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr hWnd);",
-        "  [DllImport(\"user32.dll\")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);",
-        "}",
-        "'@",
-        "$port = " + String(browserCdpPort),
-        "$needle = '--remote-debugging-port=' + $port",
-        "$proc = Get-CimInstance Win32_Process |",
-        "  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } |",
-        "  Select-Object -First 1",
-        "if (-not $proc) { exit 21 }",
-        "$chrome = Get-Process -Id $proc.ProcessId -ErrorAction SilentlyContinue",
-        "if (-not $chrome -or $chrome.MainWindowHandle -eq 0) { exit 22 }",
-        "[OmpNativePaste]::ShowWindowAsync($chrome.MainWindowHandle, 9) | Out-Null",
-        "[OmpNativePaste]::SetForegroundWindow($chrome.MainWindowHandle) | Out-Null",
-        "Start-Sleep -Milliseconds 80",
-        "[System.Windows.Forms.SendKeys]::SendWait('^v')",
-        "Start-Sleep -Milliseconds 40",
-      ].join("\n");
-
-      const exitCode = await new Promise<number>((resolve, reject) => {
-        const child = spawn(
-          "powershell.exe",
-          [
-            "-NoProfile",
-            "-NonInteractive",
-            "-STA",
-            "-Command",
-            script,
-          ],
-          {
-            windowsHide: true,
-            stdio: "ignore",
-          },
-        );
-        child.once("error", reject);
-        child.once("exit", code => resolve(code ?? 1));
-      });
-
-      if (exitCode !== 0) return undefined;
-
-      const editedAt = Date.now();
-      const deadline = Date.now() + 2_500;
-      let actual = before;
-
-      while (Date.now() < deadline) {
-        actual = await this.#composerPromptText(composer);
-        if (actual !== before) break;
-
-        const attachment = await composer
-          .locator("xpath=ancestor::form[1]")
-          .locator(
-            '[data-testid*="attachment" i], ' +
-              '[data-testid*="paste" i], ' +
-              '[aria-label*="pasted text" i]',
-          )
-          .count()
-          .catch(() => 0);
-        if (attachment > 0) {
-          throw new Error(
-            'ChatGPT converted the Windows-native paste into a "Pasted text" attachment.',
-          );
-        }
-
-        await sleep(20);
-      }
-
-      const verifiedAt = Date.now();
-      if (actual === before) return undefined;
-
-      if (!this.#verifyComposerInsertion(before, actual, text)) {
-        throw new Error(
-          "ChatGPT changed the composer during Windows-native paste " +
-            "(prompt " + text.length +
-            " chars, observed " + actual.length + " chars).",
-        );
-      }
-
-      return {
-        editMs: editedAt - editStartedAt,
-        verifyMs: verifiedAt - editedAt,
-      };
-    } finally {
-      await this.#restoreClipboardPrompt(page, text);
-    }
-  }
-
   async #insertComposerText(
     page: Page,
     composer: Locator,
     text: string,
-    browserCdpPort: number,
   ): Promise<{
-    mode: "windows-paste" | "execCommand" | "cdp";
+    mode: "execCommand" | "cdp";
     editMs: number;
     verifyMs: number;
   }> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
-
-    const nativePaste = await this.#windowsNativePaste(
-      page,
-      composer,
-      text,
-      browserCdpPort,
-      before,
-    );
-    if (nativePaste) {
-      return {
-        mode: "windows-paste",
-        ...nativePaste,
-      };
-    }
-
     const editStartedAt = Date.now();
 
+    // Backend-only inline insertion. No OS clipboard, no foreground-window
+    // activation, and no synthetic paste events that ChatGPT may promote to
+    // a "Pasted text" attachment.
     const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
       if (document.activeElement !== el) el.focus();
