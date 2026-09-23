@@ -111,11 +111,13 @@ Then in OMP:
 /web-open
 ```
 
-`/web-open` launches ordinary Chrome with a dedicated OMP profile and a local
-DevTools port. It deliberately does **not** attach Playwright during sign-in.
-Sign in to ChatGPT first. The provider attaches over CDP only when an actual
-`chatgpt-web/web` model turn begins. This avoids Playwright's normal launch
-flags (including `--no-sandbox`) on the login browser.
+`/web-open` launches ordinary Chrome with a dedicated OMP profile and **no
+Playwright/automation/debugging flags at all**. Sign in to ChatGPT, then close
+that Chrome window completely. On the first `chatgpt-web/web` model turn, the
+provider reopens the same dedicated profile with a local DevTools port and only
+then attaches Playwright over CDP. This keeps Google/OpenAI sign-in outside the
+automation phase and avoids Playwright's normal launch flags (including
+`--no-sandbox`) on the login browser.
 
 Chrome 136+ requires remote debugging to use a non-default `--user-data-dir`;
 the extension already uses `~/.omp/chatgpt-web/chrome` for that isolated
