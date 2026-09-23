@@ -297,7 +297,7 @@ silently submitting the agent prompt without the connector.
 ## Development
 
 ```sh
-npm install
+npm ci
 npm run check
 ```
 
