@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 export class TunnelSupervisor {
-  #child?: ChildProcessWithoutNullStreams;
+  #child?: ChildProcess;
   #lastError?: string;
   #ready = false;
   #healthDir?: string;
@@ -133,10 +133,10 @@ export class TunnelSupervisor {
       }
     };
 
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", chunk => appendLog("stdout", chunk));
-    child.stderr.on("data", chunk => appendLog("stderr", chunk));
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", chunk => appendLog("stdout", chunk));
+    child.stderr?.on("data", chunk => appendLog("stderr", chunk));
 
     child.once("error", error => {
       this.#lastError = error.message;
