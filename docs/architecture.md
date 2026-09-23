@@ -183,8 +183,10 @@ ordinary continuation
 
 compact
   -> same retained thread
+  -> direct-editor compaction prompt insertion
   -> summary returned to OMP
-  -> same page navigated to fresh Temporary Chat
+  -> fresh replacement page prepared
+  -> old compacted page retired
 
 next epoch
   -> full compacted OMP seed
@@ -203,19 +205,24 @@ retained browser session exists, compaction:
 
 1. reserves the conversation with a per-session barrier
 2. waits for the previous browser turn to physically settle
-3. submits a short retained-compaction instruction into that same ChatGPT thread
+3. inserts a short retained-compaction instruction with the same
+   ProseMirror/Lexical/execCommand/CDP strategy used by ordinary turns
 4. waits for the summary
 5. returns the summary to OMP
-6. resets the same page to a fresh Temporary Chat
-7. releases the barrier
+6. prepares a fresh replacement Temporary Chat
+7. swaps session ownership to the ready replacement, then retires the old page
+8. releases the barrier
 
 New ordinary turns wait behind this boundary.
 
 A standalone text-only Temporary Chat is only a fallback when there is no
 usable retained browser conversation, for example after browser/session loss.
+It uses the same direct-editor insertion strategy and explicitly verifies that
+the OMP connector is not attached.
 
-Text-only fallback requests explicitly verify that the OMP connector is not
-attached.
+Page retirement is last-tab safe: when a stale/transient page is Chrome's only
+remaining page, the backend navigates it to `about:blank` rather than closing
+it. That keeps the dedicated CDP browser alive for the next provider request.
 
 ## Subagents
 
@@ -310,8 +317,8 @@ Completions API as an inference fallback.
 ## Known integration limits
 
 - ChatGPT composer and Apps selectors can change without notice.
-- Large inline prompts can be slower to inject into a long retained page than a
-  human clipboard paste.
+- If direct ProseMirror/Lexical discovery fails, insertion falls back to older
+  contenteditable/CDP paths and very large prompts can become slower.
 - ChatGPT Web does not expose authoritative token accounting through this
   browser route, so provider usage remains zero.
 - The provider is text-only.
