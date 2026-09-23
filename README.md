@@ -149,68 +149,60 @@ the actual tool and sends its result back into the same Web response.
 
 ## Context compaction
 
-OMP's normal `/compact`, automatic threshold compaction, and mid-turn
-compaction remain owned by OMP.
+The browser backend now retains **one ChatGPT conversation tab per OMP provider
+session**, following the retained-conversation ownership pattern used by
+`codex-chatgpt-web`.
 
-The provider recognizes OMP's dedicated compaction summarization context and
-routes those calls through a separate **text-only ChatGPT Web turn**:
-
-```text
-active OMP /goal turn ---------> ChatGPT Web + @OMP MCP
-          |
-          +-- compaction ------> separate Temporary Chat
-                                  - no MCP connector
-                                  - no tools
-                                  - summary text only
-                                  - closes when summary returns
-```
-
-Supported context-maintenance calls:
-
-- full structured compaction summary
-- short PR-style compaction summary
-- split-turn prefix summary
-- OMP handoff document generation used by the default automatic compaction fallback
-
-These side requests do not touch the active turn broker/token, so a mid-turn
-compaction cannot consume or replace the Web response that is currently waiting
-on an OMP tool result. With OMP's default method order
-`remote → snapcompact → handoff → shake → soft`, this text-only provider skips
-the unsupported remote/snapcompact paths and can service the handoff stage
-without invoking Codex or Work.
-
-No Codex/Work/API inference backend is used for summarization either; the
-summary is produced by the same normal ChatGPT Web account.
-
-This project is intentionally text-only. Snapcompact/image transport is not a
-goal for this provider.
-
-## Persistent in-OMP configuration
-
-You can configure the tunnel and connector directly inside OMP. Values are
-stored outside the plugin install directory at
-`~/.omp/chatgpt-web/config.json`, so `omp install --force` does not erase
-them and changes take effect immediately in the running extension.
+Ordinary OMP model turns therefore do not create a fresh ChatGPT conversation
+every time:
 
 ```text
-/web-config tunnel tunnel_...
-/web-config api sk-...
-/web-config connector OMP Local
-/web-config show
+OMP session
+   |
+   +-- first model turn ------> retained ChatGPT tab
+   |                            full OMP context seed
+   |
+   +-- later model turns ----> same tab / same conversation
+   |                            only the new OMP turn delta
+   |
+   +-- /compact -------------> same retained conversation
+                                compaction instruction only
+                                (history is already in the thread)
+             |
+             +-- summary returned to OMP
+             |
+             +-- same browser tab is reset to a fresh Temporary Chat
+                                |
+                                +-- next OMP model turn seeds
+                                    OMP's compacted context
 ```
 
-Other supported settings:
+This avoids repeatedly replaying the complete OMP history into ChatGPT while
+also letting ChatGPT compact the exact conversation it actually saw.
 
-```text
-/web-config browser C:\Program Files\Google\Chrome\Application\chrome.exe
-/web-config cdp 9222
-/web-config clear api
-/web-config clear tunnel
-```
+OMP's normal `/compact`, automatic threshold compaction, split-prefix
+compaction, and handoff requests are still detected by the provider. The stable
+browser ownership key prefers OMP's `promptCacheKey` over the provider
+`sessionId`, because OMP side requests such as handoff may use a derived
+session ID while retaining the parent cache/session identity.
 
-`/web-config show` masks the API key. Note that supplying an API key directly
-as slash-command text may still expose it to local command/session history; on
-shared machines prefer configuring credentials outside OMP.
+### Mid-turn compaction
+
+If OMP requests compaction while the retained ChatGPT response is still inside
+an MCP tool round, the same tab cannot safely accept another user message yet.
+That case uses a temporary text-only side chat for the compaction request and
+marks the retained conversation for reset. Once the active tool/model turn
+physically settles, the retained tab is reset to a fresh chat before the next
+ordinary OMP turn.
+
+This preserves the active MCP request while keeping the post-compaction browser
+state aligned with OMP's compacted context.
+
+No Codex/Work/API inference backend is used for summarization; compaction is
+still produced through normal ChatGPT Web.
+
+This project remains intentionally text-only. Snapcompact/image transport is
+not a goal for this provider.
 
 ## Commands
 
