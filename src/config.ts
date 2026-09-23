@@ -8,6 +8,7 @@ export interface PersistedRuntimeConfig {
   browserCdpPort?: number;
   tunnelId?: string;
   tunnelApiKey?: string;
+  tunnelClientBin?: string;
 }
 
 export interface RuntimeConfig {
@@ -95,7 +96,56 @@ export function applyRuntimeConfigPatch(
   }
   if (patch.tunnelId !== undefined) config.tunnelId = patch.tunnelId || undefined;
   if (patch.tunnelApiKey !== undefined) config.tunnelApiKey = patch.tunnelApiKey || undefined;
+  if (patch.tunnelClientBin !== undefined) {
+    config.tunnelClientBin = patch.tunnelClientBin || defaultTunnelClientExecutable();
+  }
   return saved;
+}
+
+export function defaultTunnelClientExecutable(): string {
+  const explicit = process.env.TUNNEL_CLIENT_BIN?.trim();
+  if (explicit) return explicit;
+
+  const names = platform() === "win32"
+    ? ["tunnel-client.exe", "tunnel-client"]
+    : ["tunnel-client"];
+
+  const candidates: string[] = [];
+  const home = homedir();
+
+  if (platform() === "win32") {
+    const localAppData = process.env.LOCALAPPDATA;
+    const userProfile = process.env.USERPROFILE || home;
+    const goPath = process.env.GOPATH;
+    const goBin = process.env.GOBIN;
+    const chocolatey = process.env.ChocolateyInstall;
+
+    if (goBin) {
+      for (const name of names) candidates.push(join(goBin, name));
+    }
+    if (goPath) {
+      for (const name of names) candidates.push(join(goPath, "bin", name));
+    }
+    for (const name of names) {
+      candidates.push(join(userProfile, "go", "bin", name));
+      candidates.push(join(userProfile, "scoop", "shims", name));
+      candidates.push(join(home, ".local", "bin", name));
+      if (localAppData) {
+        candidates.push(join(localAppData, "Microsoft", "WinGet", "Links", name));
+        candidates.push(join(localAppData, "Programs", "tunnel-client", name));
+      }
+      if (chocolatey) candidates.push(join(chocolatey, "bin", name));
+    }
+  } else {
+    for (const name of names) {
+      candidates.push(join(home, ".local", "bin", name));
+      candidates.push(join(home, "go", "bin", name));
+      candidates.push(join("/usr/local/bin", name));
+      candidates.push(join("/opt/homebrew/bin", name));
+    }
+  }
+
+  return firstExisting(candidates) || names[0]!;
 }
 
 export function defaultBrowserExecutable(): string | undefined {
@@ -150,7 +200,9 @@ export function loadRuntimeConfig(): RuntimeConfig {
     headed: envBoolean("OMP_CHATGPT_WEB_HEADED", true),
     autoApproveToolCalls: envBoolean("OMP_CHATGPT_WEB_AUTO_APPROVE", false),
     turnTimeoutMs: Math.floor(envNumber("OMP_CHATGPT_WEB_TURN_TIMEOUT_MS", 15 * 60_000)),
-    tunnelClientBin: process.env.TUNNEL_CLIENT_BIN?.trim() || "tunnel-client",
+    tunnelClientBin:
+      persisted.tunnelClientBin ||
+      defaultTunnelClientExecutable(),
     tunnelId: persisted.tunnelId || process.env.CONTROL_PLANE_TUNNEL_ID?.trim() || undefined,
     tunnelApiKey: persisted.tunnelApiKey || process.env.CONTROL_PLANE_API_KEY?.trim() || undefined,
   };
