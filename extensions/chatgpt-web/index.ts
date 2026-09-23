@@ -163,7 +163,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("web-config", {
-    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | connector <name> | browser <path> | cdp <port> | clear <key>",
+    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | clear <key>",
     handler: async (args, ctx) => {
       try {
         const trimmed = args.trim();
@@ -184,6 +184,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "api: " + maskedApi,
               "connector: " + config.connectorName,
               "browser: " + (config.browserExecutable || "(auto)"),
+              "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
             ].join("\n"),
             "info",
@@ -205,8 +206,10 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { connectorName: "" });
           } else if (key === "browser") {
             applyRuntimeConfigPatch(config, { browserExecutable: "" });
+          } else if (key === "tunnel-bin") {
+            applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
           } else {
-            ctx.ui.notify("Usage: /web-config clear api|tunnel|connector|browser", "warning");
+            ctx.ui.notify("Usage: /web-config clear api|tunnel|tunnel-bin|connector|browser", "warning");
             return;
           }
           if (key === "api" || key === "tunnel") {
@@ -218,7 +221,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
 
         if (!value) {
           ctx.ui.notify(
-            "Usage: /web-config show | tunnel <id> | api <key> | connector <name> | browser <path> | cdp <port> | clear <key>",
+            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | clear <key>",
             "warning",
           );
           return;
@@ -235,6 +238,13 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           applyRuntimeConfigPatch(config, { tunnelApiKey: value });
           await tunnel.stop(config).catch(() => undefined);
           ctx.ui.notify("Saved Secure MCP Tunnel runtime API key.", "info");
+          return;
+        }
+
+        if (action === "tunnel-bin") {
+          applyRuntimeConfigPatch(config, { tunnelClientBin: value });
+          await tunnel.stop(config).catch(() => undefined);
+          ctx.ui.notify("Saved tunnel-client executable: " + value, "info");
           return;
         }
 
@@ -262,7 +272,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         }
 
         ctx.ui.notify(
-          "Unknown web-config key. Use: show | tunnel | api | connector | browser | cdp | clear",
+          "Unknown web-config key. Use: show | tunnel | api | tunnel-bin | connector | browser | cdp | clear",
           "warning",
         );
       } catch (error) {
