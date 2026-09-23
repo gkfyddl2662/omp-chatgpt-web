@@ -53,6 +53,7 @@ export class ChatGptBrowserBackend {
   readonly #turns = new Map<string, BrowserTurn>();
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #reservedPages = new Set<Page>();
+  readonly #compactionBarriers = new Map<string, Promise<void>>();
   #lastPreparation?: BrowserPreparationTiming;
 
   async openLogin(config: RuntimeConfig): Promise<void> {
@@ -157,6 +158,7 @@ export class ChatGptBrowserBackend {
       this.#turns.clear();
       this.#sessions.clear();
       this.#reservedPages.clear();
+      this.#compactionBarriers.clear();
     });
 
     return context;
@@ -343,11 +345,39 @@ export class ChatGptBrowserBackend {
     };
   }
 
+  async #waitForCompactionBarrier(
+    sessionKey: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const barrier = this.#compactionBarriers.get(sessionKey);
+    if (!barrier) return;
+    if (!signal) {
+      await barrier;
+      return;
+    }
+    if (signal.aborted) {
+      throw signal.reason ??
+        new DOMException("ChatGPT compaction barrier wait aborted", "AbortError");
+    }
+    await Promise.race([
+      barrier,
+      new Promise<never>((_resolve, reject) => {
+        const abort = () => reject(
+          signal.reason ??
+            new DOMException("ChatGPT compaction barrier wait aborted", "AbortError"),
+        );
+        signal.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
+  }
+
   async startTurn(
     sessionKey: string,
     prompt: string,
     config: RuntimeConfig,
   ): Promise<void> {
+    await this.#waitForCompactionBarrier(sessionKey);
+
     if (this.#turns.has(sessionKey)) {
       throw new Error(
         "ChatGPT Web turn already exists for session " + sessionKey,
@@ -468,6 +498,37 @@ export class ChatGptBrowserBackend {
       session.lastUsedAt = Date.now();
     } catch {
       await this.invalidateSession(sessionKey);
+    }
+  }
+
+  async compactRetainedSessionWhenIdle(
+    sessionKey: string,
+    prompt: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const previous = this.#compactionBarriers.get(sessionKey);
+    if (previous) await previous;
+
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    this.#compactionBarriers.set(sessionKey, barrier);
+
+    try {
+      await this.waitForTurnIdle(sessionKey, signal);
+      return await this.compactRetainedSession(
+        sessionKey,
+        prompt,
+        config,
+        signal,
+      );
+    } finally {
+      release();
+      if (this.#compactionBarriers.get(sessionKey) === barrier) {
+        this.#compactionBarriers.delete(sessionKey);
+      }
     }
   }
 
@@ -611,6 +672,7 @@ export class ChatGptBrowserBackend {
     this.#turns.clear();
     this.#sessions.clear();
     this.#reservedPages.clear();
+    this.#compactionBarriers.clear();
 
     const browser = this.#browser;
     this.#browser = undefined;
