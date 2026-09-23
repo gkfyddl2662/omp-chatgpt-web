@@ -186,17 +186,26 @@ browser ownership key prefers OMP's `promptCacheKey` over the provider
 `sessionId`, because OMP side requests such as handoff may use a derived
 session ID while retaining the parent cache/session identity.
 
-### Mid-turn compaction
+### Mid-turn and asynchronous compaction
 
-If OMP requests compaction while the retained ChatGPT response is still inside
-an MCP tool round, the same tab cannot safely accept another user message yet.
-That case uses a temporary text-only side chat for the compaction request and
-marks the retained conversation for reset. Once the active tool/model turn
-physically settles, the retained tab is reset to a fresh chat before the next
-ordinary OMP turn.
+If OMP requests compaction while the retained ChatGPT response is still active,
+the provider does **not** open a second browser tab for that compaction request.
+The compaction request reserves the retained conversation, waits for the active
+browser turn to settle, then submits the compacting instruction into that same
+ChatGPT thread.
 
-This preserves the active MCP request while keeping the post-compaction browser
-state aligned with OMP's compacted context.
+Because the source history is already present in the retained thread, this path
+uses the short retained-compaction prompt rather than replaying the complete
+`<conversation>...</conversation>` payload into a side chat.
+
+After ChatGPT returns the compacted summary, OMP receives that summary and the
+same browser tab is navigated to a fresh Temporary Chat. The next ordinary OMP
+turn seeds OMP's newly compacted context into that fresh conversation. New
+ordinary browser turns are held behind a per-conversation compaction barrier so
+they cannot race the handoff/reset boundary.
+
+A standalone text-only compaction chat is now only a fallback when there is no
+usable retained browser conversation (for example after browser/session loss).
 
 No Codex/Work/API inference backend is used for summarization; compaction is
 still produced through normal ChatGPT Web.
