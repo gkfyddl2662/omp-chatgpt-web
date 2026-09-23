@@ -230,7 +230,10 @@ ChatGPT sees a fixed MCP ABI instead of a permanently expanded schema for every
 possible OMP tool:
 
 - `omp_tool_inventory(turn_token, ...)` — returns the exact tool catalog and
-  schemas active for this OMP turn.
+  schemas active for this OMP turn. Its optional `query` accepts a literal
+  phrase or multiple search keywords; when no tool contains all keywords, the
+  inventory falls back to tools matching any keyword instead of returning an
+  avoidable empty result.
 - `omp_tool_call(turn_token, name, arguments)` — asks OMP to emit and execute
   one ordinary native tool call.
 - `omp_turn_complete(turn_token, answer)` — completes the current OMP model
