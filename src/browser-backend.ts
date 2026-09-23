@@ -39,7 +39,7 @@ interface BrowserSession {
   seeded: boolean;
 }
 
-type BrowserPreparationKind = "turn" | "retained-compaction" | "text-only";
+type BrowserPreparationKind = "turn" | "retained-compaction";
 
 interface ComposerInsertionTiming {
   mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
@@ -695,7 +695,7 @@ export class ChatGptBrowserBackend {
     const preparationStartedAt = Date.now();
     const page = session.page;
     let composer = await this.#requireComposer(page);
-    composer = await this.#prepareTextOnlyComposer(
+    composer = await this.#prepareCompactionComposer(
       page,
       composer,
       config.connectorName,
@@ -758,71 +758,6 @@ export class ChatGptBrowserBackend {
     }
   }
 
-  async runTextOnly(
-    prompt: string,
-    config: RuntimeConfig,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    const preparationStartedAt = Date.now();
-    const page = await this.#acquireUnownedPage(config);
-    try {
-      await this.#navigateFreshChat(page, config);
-      if (signal?.aborted) {
-        throw signal.reason ??
-          new DOMException("Text-only Web request aborted", "AbortError");
-      }
-
-      let composer = await this.#requireComposer(page);
-      composer = await this.#prepareTextOnlyComposer(
-        page,
-        composer,
-        config.connectorName,
-      );
-      const composerReadyAt = Date.now();
-
-      const baselineAssistants = await page
-        .locator('[data-message-author-role="assistant"]')
-        .count()
-        .catch(() => 0);
-      const baselineUsers = await page
-        .locator('[data-message-author-role="user"]')
-        .count()
-        .catch(() => 0);
-
-      const insertion = await this.#insertComposerText(
-        page,
-        composer,
-        prompt,
-        config.insertMode,
-      );
-      const insertedAt = Date.now();
-
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
-      const submittedAt = Date.now();
-      this.#lastPreparation = {
-        kind: "text-only",
-        promptChars: prompt.length,
-        sessionMs: composerReadyAt - preparationStartedAt,
-        mentionMs: 0,
-        insertMs: insertedAt - composerReadyAt,
-        insertMode: insertion.mode,
-        ...(insertion.detail ? { insertDetail: insertion.detail } : {}),
-        insertEditMs: insertion.editMs,
-        insertVerifyMs: insertion.verifyMs,
-        submitMs: submittedAt - insertedAt,
-      };
-
-      return await this.#waitForAssistantText(
-        page,
-        config.turnTimeoutMs,
-        signal,
-        baselineAssistants,
-      );
-    } finally {
-      await this.#releasePageWithoutStoppingBrowser(page);
-    }
-  }
 
   async invalidateSession(sessionKey: string): Promise<void> {
     const turn = this.#turns.get(sessionKey);
@@ -1519,7 +1454,7 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #prepareTextOnlyComposer(
+  async #prepareCompactionComposer(
     page: Page,
     composer: Locator,
     connectorName: string,
@@ -1569,7 +1504,7 @@ export class ChatGptBrowserBackend {
     const attached = await firstVisible([selected, nearComposer], 100);
     if (attached) {
       throw new Error(
-        'Text-only compaction requires a fresh ChatGPT chat with no "' +
+        'Compaction requires the ChatGPT composer to have no "' +
           connectorName +
           '" connector attached.',
       );
