@@ -22,6 +22,55 @@ test("inventory exposes the current OMP tool schema", () => {
   assert.equal(page.tools[0]?.parameters.type, "object");
 });
 
+test("inventory treats multi-keyword queries as resilient search terms", () => {
+  const broker = new TurnBroker();
+  const searchTools: Tool[] = [
+    {
+      name: "read",
+      description: "Read a file from disk",
+      parameters: {} as Tool["parameters"],
+    },
+    {
+      name: "write",
+      description: "Write content to a file",
+      parameters: {} as Tool["parameters"],
+    },
+    {
+      name: "grep",
+      description: "Search file contents",
+      parameters: {} as Tool["parameters"],
+    },
+  ];
+  const { token } = broker.begin("inventory-search", searchTools);
+
+  const separateTerms = broker.inventory(token, {
+    query: "write read",
+    includeSchema: false,
+  });
+  assert.deepEqual(
+    separateTerms.tools.map(tool => tool.name),
+    ["read", "write"],
+  );
+
+  const allTerms = broker.inventory(token, {
+    query: "read file",
+    includeSchema: false,
+  });
+  assert.deepEqual(
+    allTerms.tools.map(tool => tool.name),
+    ["read"],
+  );
+
+  const exactPhrase = broker.inventory(token, {
+    query: "file contents",
+    includeSchema: false,
+  });
+  assert.deepEqual(
+    exactPhrase.tools.map(tool => tool.name),
+    ["grep"],
+  );
+});
+
 test("MCP request becomes an outer OMP action and resolves from its native ToolResult", async () => {
   const broker = new TurnBroker({ toolTimeoutMs: 2_000 });
   const { token } = broker.begin("session-1", tools);

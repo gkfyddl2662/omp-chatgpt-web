@@ -166,7 +166,7 @@ export async function createMcpServer(options: {
           {
             name: "omp_tool_inventory",
             description:
-              "List tools available in the current Oh My Pi turn. Call this before using a tool when you need its exact schema. The outer OMP runtime remains authoritative for tool execution, approvals, session state, and Goal state.",
+              "List tools available in the current Oh My Pi turn. Call this before using a tool when you need its exact schema. The optional query is a search expression: a literal phrase is preferred; otherwise multiple whitespace-separated keywords are matched together, then as alternatives if no single tool contains them all. Omit query to list all tools. The outer OMP runtime remains authoritative for tool execution, approvals, session state, and Goal state.",
             inputSchema: {
               type: "object",
               properties: {
