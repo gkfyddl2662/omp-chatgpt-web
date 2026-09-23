@@ -241,6 +241,15 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             "tabs: " + browserStatus.tabs,
             "retained sessions: " + browserStatus.retainedSessions,
             "active Web turns: " + browserStatus.activeTurns,
+            ...(browserStatus.lastPreparation
+              ? [
+                  "last prompt chars: " + browserStatus.lastPreparation.promptChars,
+                  "prep ms: session=" + browserStatus.lastPreparation.sessionMs +
+                    " mention=" + browserStatus.lastPreparation.mentionMs +
+                    " insert=" + browserStatus.lastPreparation.insertMs +
+                    " submit=" + browserStatus.lastPreparation.submitMs,
+                ]
+              : []),
           ].join("\n"),
           "info",
         );
