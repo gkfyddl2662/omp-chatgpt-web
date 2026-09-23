@@ -5,6 +5,7 @@ import {
   applyRuntimeConfigPatch,
   loadRuntimeConfig,
   persistentConfigPath,
+  resetComposerInsertMode,
   resetSubagentLimit,
   tunnelConfigured,
 } from "../../src/config.js";
@@ -219,6 +220,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
               "subagents: " + (config.subagentLimit < 0 ? "unlimited" : config.subagentLimit),
+              "insert: " + config.insertMode,
             ].join("\n"),
             "info",
           );
@@ -265,6 +267,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "pending compactions: " + browserStatus.pendingCompactions,
               "shared Web sessions: " + sharedBindingCount,
               "subagents: " + formatSubagentLimit(subagentStatus),
+              "insert strategy: " + config.insertMode,
               ...(browserStatus.lastPreparation
                 ? [
                     "last prompt chars: " + browserStatus.lastPreparation.promptChars,
@@ -388,6 +391,8 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { browserExecutable: "" });
           } else if (key === "subagents") {
             resetSubagentLimit(config);
+          } else if (key === "insert") {
+            resetComposerInsertMode(config);
           } else {
             applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
           }
@@ -425,6 +430,16 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         if (key === "browser") {
           applyRuntimeConfigPatch(config, { browserExecutable: value });
           ctx.ui.notify("Saved browser executable path.", "info");
+          return;
+        }
+        if (key === "insert") {
+          const mode = value.trim().toLowerCase();
+          if (mode !== "default" && mode !== "lexical") {
+            ctx.ui.notify("Insert mode must be 'default' or 'lexical'.", "warning");
+            return;
+          }
+          applyRuntimeConfigPatch(config, { insertMode: mode });
+          ctx.ui.notify("Saved ChatGPT composer insert mode: " + mode, "info");
           return;
         }
         if (key === "subagents") {
