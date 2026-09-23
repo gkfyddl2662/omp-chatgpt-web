@@ -38,12 +38,22 @@ interface BrowserSession {
   seeded: boolean;
 }
 
+type BrowserPreparationKind = "turn" | "retained-compaction" | "text-only";
+
+interface ComposerInsertionTiming {
+  mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
+  editMs: number;
+  verifyMs: number;
+  detail?: string;
+}
+
 interface BrowserPreparationTiming {
+  kind: BrowserPreparationKind;
   promptChars: number;
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "prosemirror" | "lexical" | "execCommand" | "cdp";
+  insertMode: ComposerInsertionTiming["mode"];
   insertDetail?: string;
   insertEditMs: number;
   insertVerifyMs: number;
@@ -264,14 +274,51 @@ export class ChatGptBrowserBackend {
       : new Error(String(lastError));
   }
 
+  async #releasePageWithoutStoppingBrowser(page: Page): Promise<void> {
+    if (page.isClosed()) {
+      this.#reservedPages.delete(page);
+      return;
+    }
+
+    // Keep ownership while the page is being retired so another concurrent
+    // request cannot acquire it as an idle page halfway through navigation.
+    this.#reservedPages.add(page);
+    try {
+      const context = this.#context;
+      const hasOtherOpenPage = Boolean(
+        context?.pages().some(candidate =>
+          candidate !== page && !candidate.isClosed()
+        ),
+      );
+
+      if (hasOtherOpenPage) {
+        await page.close().catch(() => undefined);
+        return;
+      }
+
+      // Closing Chrome's final tab can tear down the whole dedicated automation
+      // browser. Retire the stale/transient surface to about:blank instead so
+      // the process stays warm and the next request can reuse this page.
+      try {
+        await page.goto("about:blank", {
+          waitUntil: "domcontentloaded",
+          timeout: 5_000,
+        });
+      } catch {
+        await page.close().catch(() => undefined);
+      }
+    } finally {
+      this.#reservedPages.delete(page);
+    }
+  }
+
   async #newSessionPage(config: RuntimeConfig): Promise<Page> {
     const page = await this.#acquireUnownedPage(config);
     try {
       await this.#navigateFreshChat(page, config);
       return page;
     } catch (error) {
-      this.#reservedPages.delete(page);
-      await page.close().catch(() => undefined);
+      await this.#releasePageWithoutStoppingBrowser(page);
       throw error;
     }
   }
@@ -453,12 +500,7 @@ export class ChatGptBrowserBackend {
       .count()
       .catch(() => 0);
 
-    let insertion: {
-      mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
-      editMs: number;
-      verifyMs: number;
-      detail?: string;
-    };
+    let insertion: ComposerInsertionTiming;
     let insertedAt: number;
 
     try {
@@ -486,6 +528,7 @@ export class ChatGptBrowserBackend {
       await this.#waitForSubmissionEvidence(page, baselineUsers);
       const submittedAt = Date.now();
       this.#lastPreparation = {
+        kind: "turn",
         promptChars: prompt.length,
         sessionMs: sessionReadyAt - preparationStartedAt,
         mentionMs: mentionReadyAt - sessionReadyAt,
@@ -551,17 +594,33 @@ export class ChatGptBrowserBackend {
     const session = this.#sessions.get(sessionKey);
     if (!session) return;
 
-    if (session.page.isClosed() || !this.#browser?.isConnected()) {
+    const previousPage = session.page;
+    if (previousPage.isClosed() || !this.#browser?.isConnected()) {
       this.#sessions.delete(sessionKey);
       return;
     }
 
+    // Prepare the fresh Temporary Chat first. Only after the replacement is
+    // fully usable do we retire the compacted conversation. This prevents the
+    // visible "last tab closes -> Chrome exits -> Chrome relaunches" cycle.
+    let replacement: Page;
     try {
-      await this.#navigateFreshChat(session.page, config);
-      session.seeded = false;
-    } catch {
-      await this.invalidateSession(sessionKey);
+      replacement = await this.#newSessionPage(config);
+    } catch (error) {
+      // The compacted thread must not receive an ordinary full seed after its
+      // history was rewritten. Remove ownership, but keep Chrome alive by
+      // retiring the stale page to about:blank when it is the final tab.
+      this.#sessions.delete(sessionKey);
+      await this.#releasePageWithoutStoppingBrowser(previousPage);
+      throw error;
     }
+
+    this.#sessions.set(sessionKey, {
+      page: replacement,
+      seeded: false,
+    });
+    this.#reservedPages.delete(replacement);
+    await this.#releasePageWithoutStoppingBrowser(previousPage);
   }
 
   async compactRetainedSessionWhenIdle(
@@ -632,8 +691,16 @@ export class ChatGptBrowserBackend {
       );
     }
 
+    const preparationStartedAt = Date.now();
     const page = session.page;
-    const composer = await this.#requireComposer(page);
+    let composer = await this.#requireComposer(page);
+    composer = await this.#prepareTextOnlyComposer(
+      page,
+      composer,
+      config.connectorName,
+    );
+    const composerReadyAt = Date.now();
+
     const baselineAssistants = await page
       .locator('[data-message-author-role="assistant"]')
       .count()
@@ -644,9 +711,30 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     try {
-      await composer.fill(prompt);
+      const insertion = await this.#insertComposerText(
+        page,
+        composer,
+        prompt,
+        config.insertMode,
+      );
+      const insertedAt = Date.now();
+
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page, baselineUsers);
+      const submittedAt = Date.now();
+      this.#lastPreparation = {
+        kind: "retained-compaction",
+        promptChars: prompt.length,
+        sessionMs: composerReadyAt - preparationStartedAt,
+        mentionMs: 0,
+        insertMs: insertedAt - composerReadyAt,
+        insertMode: insertion.mode,
+        ...(insertion.detail ? { insertDetail: insertion.detail } : {}),
+        insertEditMs: insertion.editMs,
+        insertVerifyMs: insertion.verifyMs,
+        submitMs: submittedAt - insertedAt,
+      };
+
       const summary = await this.#waitForAssistantText(
         page,
         config.turnTimeoutMs,
@@ -654,10 +742,10 @@ export class ChatGptBrowserBackend {
         baselineAssistants,
       );
 
-      // Match codex-chatgpt-web retained compaction semantics: the compact
-      // response comes from the retained conversation, then that SAME tab is
-      // reset to a fresh chat. The next ordinary OMP turn seeds the compacted
-      // OMP context into this fresh conversation.
+      // The compact response is generated from the retained thread, but OMP
+      // rewrites its history after accepting that summary. Prepare a fresh
+      // replacement Temporary Chat before retiring the old thread so Chrome
+      // never has to close/relaunch between handoff and the next ordinary turn.
       await this.#resetSessionPage(sessionKey, config);
       return summary;
     } catch (error) {
@@ -671,6 +759,7 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
+    const preparationStartedAt = Date.now();
     const page = await this.#acquireUnownedPage(config);
     try {
       await this.#navigateFreshChat(page, config);
@@ -679,7 +768,14 @@ export class ChatGptBrowserBackend {
           new DOMException("Text-only Web request aborted", "AbortError");
       }
 
-      const composer = await this.#requireComposer(page);
+      let composer = await this.#requireComposer(page);
+      composer = await this.#prepareTextOnlyComposer(
+        page,
+        composer,
+        config.connectorName,
+      );
+      const composerReadyAt = Date.now();
+
       const baselineAssistants = await page
         .locator('[data-message-author-role="assistant"]')
         .count()
@@ -689,14 +785,30 @@ export class ChatGptBrowserBackend {
         .count()
         .catch(() => 0);
 
-      await this.#assertNoConnectorSelected(
+      const insertion = await this.#insertComposerText(
         page,
         composer,
-        config.connectorName,
+        prompt,
+        config.insertMode,
       );
-      await composer.fill(prompt);
+      const insertedAt = Date.now();
+
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page, baselineUsers);
+      const submittedAt = Date.now();
+      this.#lastPreparation = {
+        kind: "text-only",
+        promptChars: prompt.length,
+        sessionMs: composerReadyAt - preparationStartedAt,
+        mentionMs: 0,
+        insertMs: insertedAt - composerReadyAt,
+        insertMode: insertion.mode,
+        ...(insertion.detail ? { insertDetail: insertion.detail } : {}),
+        insertEditMs: insertion.editMs,
+        insertVerifyMs: insertion.verifyMs,
+        submitMs: submittedAt - insertedAt,
+      };
+
       return await this.#waitForAssistantText(
         page,
         config.turnTimeoutMs,
@@ -704,8 +816,7 @@ export class ChatGptBrowserBackend {
         baselineAssistants,
       );
     } finally {
-      this.#reservedPages.delete(page);
-      await page.close().catch(() => undefined);
+      await this.#releasePageWithoutStoppingBrowser(page);
     }
   }
 
@@ -717,7 +828,7 @@ export class ChatGptBrowserBackend {
     const session = this.#sessions.get(sessionKey);
     this.#sessions.delete(sessionKey);
     if (session && !session.page.isClosed()) {
-      await session.page.close().catch(() => undefined);
+      await this.#releasePageWithoutStoppingBrowser(session.page);
     }
   }
 
@@ -825,12 +936,7 @@ export class ChatGptBrowserBackend {
     composer: Locator,
     text: string,
     strategy: RuntimeConfig["insertMode"],
-  ): Promise<{
-    mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
-    editMs: number;
-    verifyMs: number;
-    detail?: string;
-  }> {
+  ): Promise<ComposerInsertionTiming> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
     const editStartedAt = Date.now();
@@ -1407,6 +1513,37 @@ export class ChatGptBrowserBackend {
         connectorName +
         '" after accepting the @mention.',
     );
+  }
+
+  async #prepareTextOnlyComposer(
+    page: Page,
+    composer: Locator,
+    connectorName: string,
+  ): Promise<Locator> {
+    let active = composer;
+
+    // Retained agent turns attach OMP Local as an inline composer pill. A
+    // compaction/handoff must be tool-free, so clear any leftover pill/draft
+    // before inserting the maintenance prompt.
+    if (
+      await this.#selectedConnectorIsExact(active, connectorName).catch(() => false)
+    ) {
+      await active.fill("");
+      active = await this.#requireComposer(page);
+    }
+
+    const existingText = await this.#composerPromptText(active).catch(() => "");
+    if (existingText.trim()) {
+      await active.fill("");
+      active = await this.#requireComposer(page);
+    }
+
+    await this.#assertNoConnectorSelected(
+      page,
+      active,
+      connectorName,
+    );
+    return active;
   }
 
   async #assertNoConnectorSelected(
