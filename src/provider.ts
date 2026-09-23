@@ -13,7 +13,7 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { RuntimeConfig } from "./config.js";
 import {
-  assertValidCompactionSummary,
+  compileCompactionPrompt,
   compileRetainedCompactionPrompt,
   isOmpCompactionContext,
 } from "./compaction.js";
@@ -251,41 +251,21 @@ export class WebModelProvider {
 
       if (isOmpCompactionContext(context, options)) {
         try {
-          // Compaction is history-destructive in OMP: once a summary is
-          // accepted, the old context is replaced. Never "salvage" a missing
-          // retained browser thread by replaying the entire OMP history into a
-          // fresh ChatGPT tab. A browser/server failure must remain a provider
-          // error so OMP keeps the original history intact.
-          if (
-            !this.#browser.hasSession(conversation) &&
-            !this.#browser.isTurnActive(conversation)
-          ) {
-            throw new Error(
-              "Cannot compact safely because the retained ChatGPT conversation is unavailable. " +
-                "Refusing full-context fallback so OMP does not commit a false compaction.",
-            );
-          }
-
-          if (
-            !this.#browser.hasRetainedConversation(conversation) &&
-            !this.#browser.isTurnActive(conversation)
-          ) {
-            throw new Error(
-              "Cannot compact safely because the retained ChatGPT conversation is not seeded. " +
-                "OMP history was left unchanged.",
-            );
-          }
-
+          // OMP's compaction side request is self-contained: when the retained
+          // ChatGPT thread survived, use the short retained prompt; when that
+          // thread was invalidated by a browser failure, use the full dedicated
+          // maintenance context in a fresh Temporary Chat. This is not an
+          // ordinary agent-turn replay and never attaches OMP Local/tools.
           const retainedPrompt = compileRetainedCompactionPrompt(context);
-          const rawSummary = await this.#browser.compactRetainedSessionWhenIdle(
+          const freshPrompt = compileCompactionPrompt(context);
+          const summary = await this.#browser.compactSessionWhenIdle(
             conversation,
-            retainedPrompt,
+            {
+              retained: retainedPrompt,
+              fresh: freshPrompt,
+            },
             this.#config,
             signal,
-          );
-          const summary = assertValidCompactionSummary(
-            rawSummary,
-            retainedPrompt,
           );
 
           pushText(stream, model, summary);
