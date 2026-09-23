@@ -12,7 +12,10 @@ const browserSource = readFileSync(
 );
 
 test("parent and subagent sessions share one module-level Web runtime", () => {
-  assert.match(extensionSource, /const sharedBroker = new TurnBroker\(\)/);
+  assert.match(
+    extensionSource,
+    /const sharedBroker = new TurnBroker\(\{ schemaForTool: toolWireSchema \}\)/,
+  );
   assert.match(
     extensionSource,
     /const sharedBrowser = new ChatGptBrowserBackend\(\)/,
@@ -26,7 +29,7 @@ test("parent and subagent sessions share one module-level Web runtime", () => {
   assert.ok(factoryStart >= 0);
   const factory = extensionSource.slice(factoryStart);
 
-  assert.doesNotMatch(factory, /const broker = new TurnBroker\(\)/);
+  assert.doesNotMatch(factory, /const broker = new TurnBroker/);
   assert.doesNotMatch(factory, /const browser = new ChatGptBrowserBackend\(\)/);
   assert.doesNotMatch(factory, /const tunnel = new TunnelSupervisor\(\)/);
 });
