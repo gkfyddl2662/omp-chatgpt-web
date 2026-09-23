@@ -185,10 +185,38 @@ summary is produced by the same normal ChatGPT Web account.
 This project is intentionally text-only. Snapcompact/image transport is not a
 goal for this provider.
 
+## Persistent in-OMP configuration
+
+You can configure the tunnel and connector directly inside OMP. Values are
+stored outside the plugin install directory at
+`~/.omp/chatgpt-web/config.json`, so `omp install --force` does not erase
+them and changes take effect immediately in the running extension.
+
+```text
+/web-config tunnel tunnel_...
+/web-config api sk-...
+/web-config connector OMP Local
+/web-config show
+```
+
+Other supported settings:
+
+```text
+/web-config browser C:\Program Files\Google\Chrome\Application\chrome.exe
+/web-config cdp 9222
+/web-config clear api
+/web-config clear tunnel
+```
+
+`/web-config show` masks the API key. Note that supplying an API key directly
+as slash-command text may still expose it to local command/session history; on
+shared machines prefer configuring credentials outside OMP.
+
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
+| `/web-config ...` | Persist tunnel/API/connector/browser settings outside the plugin install directory |
 | `/web-open` | Open ordinary Chrome for manual sign-in; automation attaches later over CDP |
 | `/web-use` | Switch this OMP session to `chatgpt-web/web` |
 | `/web-status` | Show provider/browser/MCP/tunnel status |
