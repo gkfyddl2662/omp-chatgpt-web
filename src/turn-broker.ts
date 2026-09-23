@@ -76,6 +76,50 @@ export type ToolSchemaProjector = (
   tool: Tool,
 ) => Record<string, unknown>;
 
+function inventorySearchTerms(query: string | undefined): {
+  phrase: string;
+  tokens: string[];
+} {
+  const phrase = (query ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  const tokens = [...new Set(phrase.split(" ").filter(Boolean))];
+  return { phrase, tokens };
+}
+
+function inventoryMatches(
+  tools: readonly Tool[],
+  query: string | undefined,
+): Tool[] {
+  const { phrase, tokens } = inventorySearchTerms(query);
+  if (!phrase) return [...tools];
+
+  const searchable = tools.map(tool => ({
+    tool,
+    haystack: (tool.name + "\n" + tool.description).toLowerCase().replace(/\s+/g, " "),
+  }));
+
+  // Prefer the user's literal phrase when it exists. If a model writes
+  // "read file", this still keeps exact phrase search precise.
+  const phraseMatches = searchable
+    .filter(item => item.haystack.includes(phrase))
+    .map(item => item.tool);
+  if (phraseMatches.length > 0 || tokens.length <= 1) return phraseMatches;
+
+  // Natural-language inventory probes often contain several independent
+  // keywords (for example "write read"). First interpret those as an AND
+  // query across name + description.
+  const allTokenMatches = searchable
+    .filter(item => tokens.every(token => item.haystack.includes(token)))
+    .map(item => item.tool);
+  if (allTokenMatches.length > 0) return allTokenMatches;
+
+  // If no single tool contains every token, interpret the query as a request
+  // for tools matching any of the terms. This makes "write read" discover
+  // separate write and read tools instead of returning an empty inventory.
+  return searchable
+    .filter(item => tokens.some(token => item.haystack.includes(token)))
+    .map(item => item.tool);
+}
+
 function defaultToolSchemaProjector(tool: Tool): Record<string, unknown> {
   const parameters = tool.parameters as unknown;
   if (parameters && typeof parameters === "object" && !Array.isArray(parameters)) {
@@ -150,15 +194,14 @@ export class TurnBroker {
     options?: { query?: string; offset?: number; limit?: number; includeSchema?: boolean },
   ): BrowserToolInventoryPage {
     const state = this.#requireToken(token);
-    const needle = options?.query?.trim().toLowerCase();
     const offset = Math.max(0, Math.floor(options?.offset ?? 0));
     const limit = Math.min(50, Math.max(1, Math.floor(options?.limit ?? 20)));
     const includeSchema = options?.includeSchema !== false;
 
-    const matches = [...state.tools.values()].filter(tool => {
-      if (!needle) return true;
-      return (tool.name + "\n" + tool.description).toLowerCase().includes(needle);
-    });
+    const matches = inventoryMatches(
+      [...state.tools.values()],
+      options?.query,
+    );
     const page = matches.slice(offset, offset + limit).map(tool => ({
       name: tool.name,
       description: tool.description,
