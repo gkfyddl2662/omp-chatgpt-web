@@ -66,3 +66,31 @@ test("connector selection fails closed unless the exact OMP app pill is attached
   assert.match(browserSource, /getAttribute\("data-highlighted"\)/);
   assert.match(browserSource, /did not attach the exact connector/);
 });
+
+test("completed Web turns remain owned until the browser physically settles", () => {
+  assert.match(browserSource, /settling\?: Promise<void>/);
+  assert.match(browserSource, /this\.#waitUntilIdle\(/);
+  assert.match(
+    browserSource,
+    /ChatGPT turn did not physically settle within/,
+  );
+  assert.match(
+    browserSource,
+    /await this\.waitForTurnIdle\(sessionKey\)/,
+  );
+});
+
+test("backend automation stays CDP-only without foreground or clipboard injection", () => {
+  assert.doesNotMatch(browserSource, /SetForegroundWindow/);
+  assert.doesNotMatch(browserSource, /SendKeys/);
+  assert.doesNotMatch(browserSource, /navigator\.clipboard/);
+  assert.doesNotMatch(browserSource, /ClipboardEvent/);
+  assert.doesNotMatch(browserSource, /bringToFront\(/);
+});
+
+test("obsolete retained-session experiment state is absent", () => {
+  assert.doesNotMatch(browserSource, /resetAfterTurn/);
+  assert.doesNotMatch(browserSource, /lastUsedAt/);
+  assert.doesNotMatch(browserSource, /markResetAfterTurn/);
+});
+
