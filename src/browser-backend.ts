@@ -687,6 +687,25 @@ export class ChatGptBrowserBackend {
 
       const actual = await this.#composerPlainText(composer);
       if (actual === expected) return;
+
+      // Roll back only the exact text node we appended. Preserve the existing
+      // @OMP Local mention/pill DOM before falling back.
+      await composer.evaluate((element, value) => {
+        const el = element as HTMLElement;
+        const last = el.lastChild;
+        if (
+          last?.nodeType === Node.TEXT_NODE &&
+          last.nodeValue === String(value)
+        ) {
+          last.remove();
+          el.dispatchEvent(new InputEvent("input", {
+            bubbles: true,
+            composed: true,
+            inputType: "deleteContentBackward",
+            data: null,
+          }));
+        }
+      }, text).catch(() => undefined);
     }
 
     // Compatibility fallback: the current ChatGPT editor rejected or rewrote
