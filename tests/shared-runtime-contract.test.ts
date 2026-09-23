@@ -10,6 +10,10 @@ const browserSource = readFileSync(
   new URL("../src/browser-backend.ts", import.meta.url),
   "utf8",
 );
+const providerSource = readFileSync(
+  new URL("../src/provider.ts", import.meta.url),
+  "utf8",
+);
 
 test("parent and subagent sessions share one module-level Web runtime", () => {
   assert.match(
@@ -97,3 +101,22 @@ test("obsolete retained-session experiment state is absent", () => {
   assert.doesNotMatch(browserSource, /markResetAfterTurn/);
 });
 
+
+
+test("compaction never replays full OMP history into a fresh fallback tab", () => {
+  const start = providerSource.indexOf("if (isOmpCompactionContext(context, options))");
+  const end = providerSource.indexOf("const expectedToolCallId", start);
+  assert.ok(start >= 0 && end > start);
+  const block = providerSource.slice(start, end);
+
+  assert.doesNotMatch(block, /runTextOnly\(/);
+  assert.match(block, /Refusing full-context fallback/);
+  assert.match(block, /compactRetainedSessionWhenIdle/);
+});
+
+test("compaction watches ChatGPT error UI before accepting assistant text", () => {
+  assert.match(browserSource, /#chatErrorState/);
+  assert.match(browserSource, /Something went wrong/);
+  assert.match(browserSource, /Retry\|Try again\|다시 시도/);
+  assert.match(browserSource, /assertValidCompactionSummary/);
+});
