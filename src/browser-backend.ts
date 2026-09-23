@@ -38,12 +38,22 @@ interface BrowserSession {
   seeded: boolean;
 }
 
+type BrowserPreparationKind = "turn" | "retained-compaction" | "text-only";
+
+interface ComposerInsertionTiming {
+  mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
+  editMs: number;
+  verifyMs: number;
+  detail?: string;
+}
+
 interface BrowserPreparationTiming {
+  kind: BrowserPreparationKind;
   promptChars: number;
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "prosemirror" | "lexical" | "execCommand" | "cdp";
+  insertMode: ComposerInsertionTiming["mode"];
   insertDetail?: string;
   insertEditMs: number;
   insertVerifyMs: number;
@@ -453,12 +463,7 @@ export class ChatGptBrowserBackend {
       .count()
       .catch(() => 0);
 
-    let insertion: {
-      mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
-      editMs: number;
-      verifyMs: number;
-      detail?: string;
-    };
+    let insertion: ComposerInsertionTiming;
     let insertedAt: number;
 
     try {
@@ -486,6 +491,7 @@ export class ChatGptBrowserBackend {
       await this.#waitForSubmissionEvidence(page, baselineUsers);
       const submittedAt = Date.now();
       this.#lastPreparation = {
+        kind: "turn",
         promptChars: prompt.length,
         sessionMs: sessionReadyAt - preparationStartedAt,
         mentionMs: mentionReadyAt - sessionReadyAt,
@@ -825,12 +831,7 @@ export class ChatGptBrowserBackend {
     composer: Locator,
     text: string,
     strategy: RuntimeConfig["insertMode"],
-  ): Promise<{
-    mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
-    editMs: number;
-    verifyMs: number;
-    detail?: string;
-  }> {
+  ): Promise<ComposerInsertionTiming> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
     const editStartedAt = Date.now();
