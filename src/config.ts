@@ -5,6 +5,8 @@ import { DEFAULT_WEB_SUBAGENT_LIMIT, normalizeWebSubagentLimit } from "./subagen
 
 export type ComposerInsertMode = "default" | "editor";
 
+export const DEFAULT_COMPOSER_INSERT_MODE: ComposerInsertMode = "editor";
+
 export interface PersistedRuntimeConfig {
   connectorName?: string;
   browserExecutable?: string;
@@ -63,7 +65,7 @@ export function parseComposerInsertMode(
 }
 
 export function normalizeComposerInsertMode(value: unknown): ComposerInsertMode {
-  return parseComposerInsertMode(value) ?? "default";
+  return parseComposerInsertMode(value) ?? DEFAULT_COMPOSER_INSERT_MODE;
 }
 
 function envInsertMode(): ComposerInsertMode {
