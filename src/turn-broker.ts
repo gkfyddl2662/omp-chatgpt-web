@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Tool, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 export interface BrowserToolDescriptor {
   name: string;
