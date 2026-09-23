@@ -44,7 +44,7 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "execCommand" | "cdp";
+  insertMode: "browser-paste" | "execCommand" | "cdp";
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -775,22 +775,296 @@ export class ChatGptBrowserBackend {
     );
   }
 
+  async #composerAttachmentCount(
+    composer: Locator,
+  ): Promise<number> {
+    const form = composer.locator("xpath=ancestor::form[1]");
+    if (await form.count().catch(() => 0)) {
+      return await form
+        .locator(
+          '[data-testid*="attachment" i], ' +
+            '[data-testid*="file" i], ' +
+            '[aria-label*="pasted text" i], ' +
+            '[aria-label*="pasted content" i]',
+        )
+        .count()
+        .catch(() => 0);
+    }
+    return 0;
+  }
+
+  async #removeNewComposerAttachments(
+    composer: Locator,
+    baseline: number,
+  ): Promise<void> {
+    const form = composer.locator("xpath=ancestor::form[1]");
+    if (!(await form.count().catch(() => 0))) return;
+
+    const removers = form.locator(
+      'button[aria-label^="Remove file" i], ' +
+        'button[aria-label*="remove attachment" i], ' +
+        '[data-testid*="attachment" i] button, ' +
+        '[data-testid*="file" i] button[aria-label*="remove" i]',
+    );
+
+    for (let attempts = 0; attempts < 6; attempts++) {
+      const count = await this.#composerAttachmentCount(composer);
+      if (count <= baseline) return;
+
+      const removerCount = await removers.count().catch(() => 0);
+      if (removerCount === 0) break;
+
+      await removers.last().click().catch(() => undefined);
+      await sleep(100);
+    }
+  }
+
+  async #backupClipboard(
+    page: Page,
+  ): Promise<boolean> {
+    const origin = new URL(page.url()).origin;
+    if (origin !== "https://chatgpt.com") return false;
+
+    try {
+      await page.context().grantPermissions(
+        ["clipboard-read", "clipboard-write"],
+        { origin },
+      );
+    } catch {
+      return false;
+    }
+
+    return await page.evaluate(async () => {
+      type StoredPart = {
+        type: string;
+        data: ArrayBuffer;
+      };
+      type StoredItem = StoredPart[];
+      const scope = globalThis as typeof globalThis & {
+        __OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__?: StoredItem[];
+      };
+
+      try {
+        const items = await navigator.clipboard.read();
+        const stored: StoredItem[] = [];
+        let totalBytes = 0;
+
+        for (const item of items) {
+          const parts: StoredItem = [];
+          for (const type of item.types) {
+            if (
+              typeof ClipboardItem === "undefined" ||
+              !ClipboardItem.supports(type)
+            ) {
+              return false;
+            }
+            const blob = await item.getType(type);
+            totalBytes += blob.size;
+            if (totalBytes > 8 * 1024 * 1024) return false;
+            parts.push({
+              type,
+              data: await blob.arrayBuffer(),
+            });
+          }
+          stored.push(parts);
+        }
+
+        scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__ = stored;
+        return true;
+      } catch {
+        delete scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
+        return false;
+      }
+    }).catch(() => false);
+  }
+
+  async #restoreClipboard(
+    page: Page,
+    copiedPrompt: string,
+  ): Promise<void> {
+    await page.evaluate(async expectedPrompt => {
+      type StoredPart = {
+        type: string;
+        data: ArrayBuffer;
+      };
+      type StoredItem = StoredPart[];
+      const scope = globalThis as typeof globalThis & {
+        __OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__?: StoredItem[];
+      };
+
+      const backup = scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
+      delete scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
+      if (!backup) return;
+
+      try {
+        // Do not overwrite a clipboard value the user changed while the
+        // automated copy/paste was in flight.
+        const current = await navigator.clipboard.readText();
+        if (current.replace(/\r\n?/g, "\n") !==
+          String(expectedPrompt).replace(/\r\n?/g, "\n")) {
+          return;
+        }
+
+        if (backup.length === 0) {
+          await navigator.clipboard.writeText("");
+          return;
+        }
+
+        const items = backup.map(parts => new ClipboardItem(
+          Object.fromEntries(
+            parts.map(part => [
+              part.type,
+              new Blob([part.data], { type: part.type }),
+            ]),
+          ),
+        ));
+        await navigator.clipboard.write(items);
+      } catch {
+        // The fast path is optional; clipboard restoration remains best-effort.
+      }
+    }, copiedPrompt).catch(() => undefined);
+  }
+
+  async #tryBrowserNativeCopyPaste(
+    page: Page,
+    composer: Locator,
+    text: string,
+    before: string,
+  ): Promise<{ editMs: number; verifyMs: number } | undefined> {
+    if (!(await this.#backupClipboard(page))) return undefined;
+
+    const attachmentBaseline = await this.#composerAttachmentCount(composer);
+    const editStartedAt = Date.now();
+    let copied = false;
+
+    try {
+      // Let Chromium itself create the clipboard payload. A normal browser
+      // selection copy carries both text/plain and rich clipboard formats,
+      // matching a user's manual copy much more closely than writeText().
+      await page.evaluate(value => {
+        const id = "__omp_chatgpt_web_copy_scratch__";
+        document.getElementById(id)?.remove();
+
+        const scratch = document.createElement("div");
+        scratch.id = id;
+        scratch.textContent = String(value);
+        scratch.style.position = "fixed";
+        scratch.style.left = "-100000px";
+        scratch.style.top = "0";
+        scratch.style.whiteSpace = "pre-wrap";
+        scratch.style.userSelect = "text";
+        scratch.style.opacity = "0";
+        document.body.appendChild(scratch);
+
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(scratch);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }, text);
+
+      await page.keyboard.press(
+        process.platform === "darwin" ? "Meta+C" : "Control+C",
+      );
+      copied = true;
+
+      await page.evaluate(() => {
+        document.getElementById(
+          "__omp_chatgpt_web_copy_scratch__",
+        )?.remove();
+      });
+
+      await composer.focus();
+      await composer.evaluate(element => {
+        if (!(element instanceof HTMLElement)) return;
+        const selection = window.getSelection();
+        if (!selection) return;
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+
+      await composer.press(
+        process.platform === "darwin" ? "Meta+V" : "Control+V",
+      );
+      const editedAt = Date.now();
+
+      const deadline = Date.now() + 2_500;
+      let actual = before;
+      while (Date.now() < deadline) {
+        const attachmentCount = await this.#composerAttachmentCount(composer);
+        if (attachmentCount > attachmentBaseline) {
+          await this.#removeNewComposerAttachments(
+            composer,
+            attachmentBaseline,
+          );
+          throw new Error(
+            'ChatGPT converted the browser-native paste into a "Pasted text" attachment.',
+          );
+        }
+
+        actual = await this.#composerPromptText(composer);
+        if (actual !== before) break;
+        await sleep(20);
+      }
+
+      const verifiedAt = Date.now();
+      if (actual === before) return undefined;
+
+      if (!this.#verifyComposerInsertion(before, actual, text)) {
+        throw new Error(
+          "ChatGPT changed the composer during browser-native paste " +
+            "(prompt " + text.length +
+            " chars, observed " + actual.length + " chars).",
+        );
+      }
+
+      return {
+        editMs: editedAt - editStartedAt,
+        verifyMs: verifiedAt - editedAt,
+      };
+    } finally {
+      await page.evaluate(() => {
+        document.getElementById(
+          "__omp_chatgpt_web_copy_scratch__",
+        )?.remove();
+      }).catch(() => undefined);
+
+      if (copied) await this.#restoreClipboard(page, text);
+    }
+  }
+
   async #insertComposerText(
     page: Page,
     composer: Locator,
     text: string,
   ): Promise<{
-    mode: "execCommand" | "cdp";
+    mode: "browser-paste" | "execCommand" | "cdp";
     editMs: number;
     verifyMs: number;
   }> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
+
+    const nativePaste = await this.#tryBrowserNativeCopyPaste(
+      page,
+      composer,
+      text,
+      before,
+    );
+    if (nativePaste) {
+      return {
+        mode: "browser-paste",
+        ...nativePaste,
+      };
+    }
+
     const editStartedAt = Date.now();
 
-    // Keep the prompt inline. Clipboard-based automation is intentionally not
-    // used here: ChatGPT can convert automated large pastes into a "Pasted
-    // text" attachment even when the same user-driven paste stays inline.
+    // Compatibility path. It is slower for very large retained prompts but
+    // always keeps the prompt inline instead of turning it into an attachment.
     const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
       if (document.activeElement !== el) el.focus();
