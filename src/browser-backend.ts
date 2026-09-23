@@ -471,6 +471,19 @@ export class ChatGptBrowserBackend {
     }
   }
 
+  async waitForTurnIdle(
+    sessionKey: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    while (this.#turns.has(sessionKey)) {
+      if (signal?.aborted) {
+        throw signal.reason ??
+          new DOMException("Retained ChatGPT turn wait aborted", "AbortError");
+      }
+      await sleep(100);
+    }
+  }
+
   async compactRetainedSession(
     sessionKey: string,
     prompt: string,
