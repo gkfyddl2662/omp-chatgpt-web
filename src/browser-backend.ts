@@ -609,7 +609,24 @@ export class ChatGptBrowserBackend {
 
     const mentionQuery =
       connectorName.trim().split(/\s+/)[0] || connectorName;
-    await page.keyboard.type("@" + mentionQuery, { delay: 35 });
+    // ChatGPT's contenteditable can duplicate characters when synthetic
+    // keydown/keypress sequences are used over CDP (e.g. "@@OOMMPP").
+    // insertText emits a single text insertion instead.
+    await page.keyboard.insertText("@" + mentionQuery);
+    await sleep(150);
+
+    const currentMentionText = (
+      (await composer.innerText().catch(() => "")) ||
+      (await composer.inputValue().catch(() => ""))
+    ).trim();
+
+    if (currentMentionText !== "@" + mentionQuery) {
+      await composer.click();
+      await page.keyboard.press("Control+A").catch(() => undefined);
+      await page.keyboard.press("Backspace").catch(() => undefined);
+      await page.keyboard.insertText("@" + mentionQuery);
+      await sleep(150);
+    }
 
     const suggestion = await firstVisible(
       [
