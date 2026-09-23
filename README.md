@@ -237,7 +237,9 @@ possible OMP tool:
 - `omp_tool_call(turn_token, name, arguments)` — asks OMP to emit and execute
   one ordinary native tool call.
 - `omp_turn_complete(turn_token, answer)` — completes the current OMP model
-  turn with final assistant text.
+  turn with final assistant text. After success, ChatGPT is instructed to render
+  that same answer as ordinary assistant prose so the retained browser thread
+  remains visibly aligned with the answer OMP received.
 
 This keeps OMP authoritative for validation, approvals, Goal state, session
 persistence, extension tools, LSP tools, and other runtime behavior.
