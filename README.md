@@ -230,19 +230,28 @@ race the summary/reset handoff.
 
 ## Commands
 
+Use `/web` as the normal entry point. Running `/web` with no arguments shows
+the built-in help and available subcommands.
+
 | Command | Purpose |
 | --- | --- |
-| `/web-open` | Open the dedicated browser profile for manual ChatGPT sign-in |
-| `/web-use` | Switch the current OMP session to `chatgpt-web/web` |
-| `/web-status` | Show browser, MCP, tunnel, retained-session, and preparation diagnostics |
-| `/web-tunnel start\|stop\|status` | Manage the Secure MCP Tunnel |
-| `/web-config show` | Show persisted provider configuration |
-| `/web-config tunnel <id>` | Persist the tunnel ID |
-| `/web-config api <key>` | Persist the tunnel runtime API key |
-| `/web-config tunnel-bin <path>` | Persist an explicit `tunnel-client` executable |
-| `/web-config connector <name>` | Persist the exact ChatGPT connector name |
-| `/web-config browser <path>` | Persist an explicit browser executable |
-| `/web-config cdp <port>` | Persist the local Chrome DevTools port |
+| `/web start` | Prepare the shared MCP/tunnel transport and switch the current session to `chatgpt-web/web` |
+| `/web use` | Switch the current OMP session to `chatgpt-web/web` without explicitly starting the tunnel first |
+| `/web open` | Open the dedicated browser profile for manual ChatGPT sign-in |
+| `/web status` | Show browser, MCP, tunnel, retained-session, and preparation diagnostics |
+| `/web tunnel` | Ensure the Secure MCP Tunnel is running |
+| `/web tunnel stop\|restart\|status` | Stop, restart, or inspect the Secure MCP Tunnel |
+| `/web config` | Show persisted provider configuration |
+| `/web set tunnel <id>` | Persist the tunnel ID |
+| `/web set api <key>` | Persist the tunnel runtime API key |
+| `/web set tunnel-bin <path>` | Persist an explicit `tunnel-client` executable |
+| `/web set connector <name>` | Persist the exact ChatGPT connector name |
+| `/web set browser <path>` | Persist an explicit browser executable |
+| `/web set cdp <port>` | Persist the local Chrome DevTools port |
+| `/web unset tunnel\|api\|tunnel-bin\|connector\|browser` | Clear a persisted value |
+
+The older `/web-open`, `/web-use`, `/web-status`, `/web-tunnel`, and
+`/web-config` commands remain available as compatibility aliases.
 
 ## Diagnostics
 
