@@ -412,7 +412,12 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
       bindingStarted = true;
       sharedBindingCount += 1;
     }
-    ctx.ui.setStatus("omp-chatgpt-web", ctx.ui.theme.fg("accent", "web-backend"));
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(
+        "omp-chatgpt-web",
+        ctx.ui.theme.fg("accent", "web-backend"),
+      );
+    }
   });
 
   pi.on("session_shutdown", async () => {
