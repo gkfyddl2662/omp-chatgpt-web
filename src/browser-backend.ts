@@ -325,6 +325,7 @@ export class ChatGptBrowserBackend {
     tabs: number;
     retainedSessions: number;
     activeTurns: number;
+    pendingCompactions: number;
     lastPreparation?: BrowserPreparationTiming;
     urls: string[];
   }> {
@@ -338,6 +339,7 @@ export class ChatGptBrowserBackend {
       tabs: this.#context?.pages().filter(page => !page.isClosed()).length ?? 0,
       retainedSessions: this.#sessions.size,
       activeTurns: this.#turns.size,
+      pendingCompactions: this.#compactionBarriers.size,
       ...(this.#lastPreparation ? { lastPreparation: { ...this.#lastPreparation } } : {}),
       urls: [...this.#sessions.values()]
         .filter(session => !session.page.isClosed())
