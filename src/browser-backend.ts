@@ -148,8 +148,8 @@ export class ChatGptBrowserBackend {
       : await context.newPage();
 
     await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
-    let composer = await this.#requireComposer(page);
-    composer = await this.#selectConnector(page, config.connectorName);
+    const composer = await this.#requireComposer(page);
+    await this.#mentionConnector(page, composer, config.connectorName);
 
     const turn: BrowserTurn = { page };
     this.#turns.set(sessionKey, turn);
@@ -161,7 +161,8 @@ export class ChatGptBrowserBackend {
     }
 
     try {
-      await composer.fill(prompt);
+      await composer.click();
+      await page.keyboard.type(" " + prompt, { delay: 0 });
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page);
     } catch (error) {
@@ -234,103 +235,73 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #selectConnector(page: Page, connectorName: string): Promise<Locator> {
-    const toolsButton = await firstVisible([
-      page.getByRole("button", { name: /^Tools$/i }),
-      page.getByRole("button", { name: /^Apps$/i }),
-      page.getByRole("button", { name: /도구/ }),
-      page.getByRole("button", { name: /앱/ }),
-      page.locator('button[data-testid="composer-plus-btn"]'),
-    ], 1_000);
-    if (!toolsButton) {
-      throw new Error(
-        "ChatGPT Tools/Apps control was not found. Refusing to send an unbound Web-model turn.",
-      );
-    }
+  async #mentionConnector(
+    page: Page,
+    composer: Locator,
+    connectorName: string,
+  ): Promise<void> {
+    await composer.click();
 
-    await toolsButton.click();
+    // A fresh Temporary Chat should have an empty composer. Clear any stale draft
+    // before inserting the app mention.
+    await page.keyboard.press("Control+A").catch(() => undefined);
+    await page.keyboard.press("Backspace").catch(() => undefined);
 
-    let connector = await firstVisible([
-      page.getByRole("menuitem", { name: connectorName, exact: true }),
+    const mentionQuery = connectorName.trim().split(/\s+/)[0] || connectorName;
+    await page.keyboard.type("@" + mentionQuery, { delay: 35 });
+
+    const suggestion = await firstVisible([
       page.getByRole("option", { name: connectorName, exact: true }),
+      page.getByRole("menuitem", { name: connectorName, exact: true }),
       page.getByRole("button", { name: connectorName, exact: true }),
       page.getByText(connectorName, { exact: true }),
-    ], 700);
+    ], 2_000);
 
-    if (!connector) {
-      const appsEntry = await firstVisible([
-        page.getByRole("menuitem", { name: /^Apps$/i }),
-        page.getByRole("menuitem", { name: /앱/ }),
-        page.getByRole("button", { name: /^Apps$/i }),
-        page.getByRole("button", { name: /앱/ }),
-        page.getByText(/^Apps$/i),
-        page.getByText(/^앱$/),
-      ], 700);
-
-      if (appsEntry) {
-        await appsEntry.click();
-        await sleep(350);
-      }
-
-      connector = await firstVisible([
-        page.getByRole("menuitem", { name: connectorName, exact: true }),
-        page.getByRole("option", { name: connectorName, exact: true }),
-        page.getByRole("button", { name: connectorName, exact: true }),
-        page.getByText(connectorName, { exact: true }),
-      ], 1_000);
-    }
-
-    if (!connector) {
-      const searchBox = await firstVisible([
-        page.getByPlaceholder(/Search apps|Search connectors|Search/i),
-        page.getByPlaceholder(/앱 검색|커넥터 검색|검색/),
-        page.locator('input[type="search"]'),
-      ], 500);
-
-      if (searchBox) {
-        await searchBox.fill(connectorName);
-        await sleep(400);
-        connector = await firstVisible([
-          page.getByRole("menuitem", { name: connectorName, exact: true }),
-          page.getByRole("option", { name: connectorName, exact: true }),
-          page.getByRole("button", { name: connectorName, exact: true }),
-          page.getByText(connectorName, { exact: true }),
-        ], 1_500);
-      }
-    }
-
-    if (!connector) {
+    if (!suggestion) {
       throw new Error(
-        'ChatGPT app "' +
+        'ChatGPT app mention "' +
           connectorName +
-          '" was not visible in the current chat. First verify it manually in ChatGPT Apps/Tools. ' +
-          "The tunnel must be running and the custom MCP app must already be created/enabled for this ChatGPT workspace.",
+          '" was not offered after typing "@' +
+          mentionQuery +
+          '". Verify that the app is enabled in this workspace and that typing "@' +
+          mentionQuery +
+          '" manually shows "' +
+          connectorName +
+          '".',
       );
     }
 
-    await connector.click();
+    await suggestion.click();
     await sleep(250);
-    await page.keyboard.press("Escape").catch(() => undefined);
 
-    const activeComposer = await this.#requireComposer(page);
-    const selected = page
-      .locator('[aria-pressed="true"], [data-state="checked"], [data-state="on"]')
-      .filter({ hasText: connectorName });
-    const composerContainer = activeComposer.locator(
+    // The app mention usually becomes a structured chip/token inside or adjacent
+    // to the composer. Verify visible evidence without rewriting the composer.
+    const composerContainer = composer.locator(
       "xpath=ancestor::*[self::form or @data-type='unified-composer'][1]",
     );
-    const nearComposer = composerContainer.getByText(connectorName, { exact: true });
-    const verified =
-      (await selected.count().catch(() => 0)) > 0 ||
-      (await nearComposer.count().catch(() => 0)) > 0;
+    const mentioned = await firstVisible([
+      composerContainer.getByText(connectorName, { exact: true }),
+      page.locator('[data-mention], [data-app-id], [data-testid*="mention"]').filter({
+        hasText: connectorName,
+      }),
+    ], 1_000);
 
-    if (!verified) {
-      throw new Error(
-        'ChatGPT app "' + connectorName + '" was clicked but selected state could not be verified. ' +
-        "Select the app manually once in ChatGPT and retry.",
-      );
+    if (!mentioned) {
+      // Some ChatGPT surfaces don't expose the mention chip to accessibility
+      // selectors. The suggestion click itself is still stronger evidence than
+      // the old '+' menu path, so only fail if the literal query remains in the
+      // composer as plain text.
+      const currentText = (await composer.innerText().catch(() => "")).trim();
+      const currentValue = (await composer.inputValue().catch(() => "")).trim();
+      const plain = currentText || currentValue;
+      if (plain === "@" + mentionQuery) {
+        throw new Error(
+          'ChatGPT app "' +
+            connectorName +
+            '" suggestion was clicked but the mention did not attach to the composer.',
+        );
+      }
     }
-    return activeComposer;
   }
 
   async #assertNoConnectorSelected(
