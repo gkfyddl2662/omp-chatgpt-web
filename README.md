@@ -276,38 +276,49 @@ the built-in help and available subcommands.
 | `/web set browser <path>` | Persist an explicit browser executable |
 | `/web set cdp <port>` | Persist the local Chrome DevTools port |
 | `/web set subagents <count>` | Persist the Web subagent hard cap (`-1`/`off` = unlimited) |
-| `/web set insert default\|editor` | Select the composer insertion strategy; `editor` is an experimental direct ProseMirror/Lexical fast path |
+| `/web set insert default\|editor` | Select the composer insertion strategy; `editor` is the default direct ProseMirror/Lexical path, while `default` bypasses direct-editor probing for compatibility/debugging |
 | `/web unset tunnel\|api\|tunnel-bin\|connector\|browser\|subagents\|insert` | Clear a persisted value, restore the default subagent cap, or restore the default insert strategy |
 
 The older `/web-open`, `/web-use`, `/web-status`, `/web-tunnel`, and
 `/web-config` commands remain available as compatibility aliases.
 
-### Experimental direct editor insertion
+### Composer insertion strategy
 
-Large OMP prompts can spend minutes inside Chromium's contenteditable insertion
-path. To test a direct editor-state path without changing prompt content:
+Direct editor insertion is the default. The provider attempts these paths in
+order without changing prompt content:
 
 ```text
-/web set insert editor
+ProseMirror transaction
+→ Lexical direct command
+→ document.execCommand("insertText")
+→ CDP Input.insertText fallback
 ```
 
-The provider first probes the active ChatGPT composer for a ProseMirror
-`EditorView`. When found, it inserts the complete prompt at the current
-selection with one `state.tr.insertText(...)` transaction and dispatches that
-transaction directly, preserving the already-selected connector pill.
-Successful turns report `mode=prosemirror` in `/web status`.
+For the current ChatGPT ProseMirror composer, the provider inserts the complete
+prompt at the current selection with one `state.tr.insertText(...)`
+transaction and dispatches it directly, preserving the already-selected
+connector pill. Successful turns report `mode=prosemirror` in `/web status`.
 
-A Lexical direct-command path remains as a secondary compatibility probe for
-other ChatGPT composer variants. If neither editor can be reached safely, the
-provider falls back to the normal `execCommand` / CDP path. The status timing
-includes a `detail=...` field so the fallback reason is visible.
+A Lexical direct-command path remains as a compatibility probe for other
+composer variants. If neither editor can be reached safely, the provider falls
+back automatically to the older contenteditable paths. The status timing
+includes a `detail=...` field so fallback reasons remain visible.
 
-The previous `/web set insert lexical` value is accepted as a legacy alias for
-`editor`, so existing persisted experimental configs keep working after an
-upgrade. To restore the normal strategy:
+New installs and configs without an explicit insert override use `editor`.
+Existing persisted `default` values are respected and continue to bypass the
+direct-editor probes. The previous `lexical` and `prosemirror` values are
+accepted as legacy aliases for `editor`.
+
+To force the older insertion path for compatibility or debugging:
 
 ```text
 /web set insert default
+```
+
+To return to the normal automatic strategy:
+
+```text
+/web unset insert
 ```
 
 ## Diagnostics
@@ -351,8 +362,9 @@ silently submitting the agent prompt without the connector.
 ## Known limitations
 
 - ChatGPT Web automation depends on current composer and Apps UI structure.
-- Large inline continuation prompts can still be slower to inject into a long
-  retained ChatGPT page than manual user paste.
+- If ChatGPT's direct editor internals cannot be discovered safely, insertion
+  falls back to the older contenteditable/CDP paths, which can be much slower
+  for very large prompts.
 - Provider token usage is reported as zero because normal ChatGPT Web does not
   expose authoritative request token accounting through this browser path.
 - Only one native OMP tool call is allowed in flight per Web response; multiple
