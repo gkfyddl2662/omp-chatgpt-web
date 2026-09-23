@@ -1,0 +1,39 @@
+{
+  "name": "omp-chatgpt-web",
+  "version": "0.2.0",
+  "description": "Use normal ChatGPT Web as the actual Oh My Pi model backend, with OMP tools and Goal bridged through native MCP calls.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/chatgpt-web/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "playwright-core": "^1.55.0"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-ai": "*",
+    "@oh-my-pi/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-ai": { "optional": true },
+    "@oh-my-pi/pi-coding-agent": { "optional": true }
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-ai": "*",
+    "@oh-my-pi/pi-coding-agent": "*",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.0"
+  }
+}

@@ -1,0 +1,182 @@
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { ChatGptBrowserBackend } from "../../src/browser-backend.js";
+import { loadRuntimeConfig, tunnelConfigured } from "../../src/config.js";
+import { createMcpServer, type McpServerHandle } from "../../src/mcp-server.js";
+import { WebModelProvider } from "../../src/provider.js";
+import { TurnBroker } from "../../src/turn-broker.js";
+import { TunnelSupervisor } from "../../src/tunnel.js";
+
+const PROVIDER = "chatgpt-web";
+const MODEL = "web";
+const API = "chatgpt-web";
+const LOCAL_SENTINEL_KEY = "omp-chatgpt-web-local-transport";
+
+export default function chatGptWebExtension(pi: ExtensionAPI) {
+  const config = loadRuntimeConfig();
+  const broker = new TurnBroker();
+  const browser = new ChatGptBrowserBackend();
+  const tunnel = new TunnelSupervisor();
+  let mcp: McpServerHandle | undefined;
+  let mcpStarting: Promise<McpServerHandle> | undefined;
+
+  async function ensureMcp(): Promise<McpServerHandle> {
+    if (mcp) return mcp;
+    if (!mcpStarting) {
+      mcpStarting = createMcpServer({
+        host: config.mcpHost,
+        port: config.mcpPort,
+        broker,
+      }).then(handle => {
+        mcp = handle;
+        return handle;
+      }).finally(() => {
+        mcpStarting = undefined;
+      });
+    }
+    return await mcpStarting;
+  }
+
+  async function ensureTransport(): Promise<void> {
+    const server = await ensureMcp();
+    const status = tunnel.status(config);
+    if (status.running) return;
+    if (tunnelConfigured(config)) {
+      await tunnel.start(config, server.url);
+    }
+  }
+
+  const provider = new WebModelProvider({
+    config,
+    broker,
+    browser,
+    ensureTransport,
+  });
+
+  pi.registerProvider(PROVIDER, {
+    baseUrl: "http://127.0.0.1/omp-chatgpt-web",
+    apiKey: LOCAL_SENTINEL_KEY,
+    api: API,
+    streamSimple: provider.streamSimple,
+    models: [{
+      id: MODEL,
+      name: "ChatGPT Web",
+      api: API,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 120_000,
+      maxTokens: 32_000,
+      preferWebsockets: false,
+    }],
+  });
+
+  pi.registerCommand("web-open", {
+    description: "Open the persistent ChatGPT Web browser profile for sign-in and connector setup",
+    handler: async (_args, ctx) => {
+      try {
+        await browser.open(config);
+        ctx.ui.notify(
+          'ChatGPT Web opened. Sign in and ensure the "' + config.connectorName + '" Tunnel connector is available.',
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("web-use", {
+    description: "Switch the current OMP session model to chatgpt-web/web",
+    handler: async (_args, ctx) => {
+      const model = ctx.models.resolve(PROVIDER + "/" + MODEL);
+      if (!model) {
+        ctx.ui.notify("chatgpt-web/web is not available in the current model registry.", "error");
+        return;
+      }
+      const changed = await pi.setModel(model);
+      ctx.ui.notify(
+        changed
+          ? "OMP model backend -> chatgpt-web/web"
+          : "Could not switch the OMP model to chatgpt-web/web.",
+        changed ? "info" : "error",
+      );
+    },
+  });
+
+  pi.registerCommand("web-status", {
+    description: "Show ChatGPT Web provider, MCP, browser, and tunnel status",
+    handler: async (_args, ctx) => {
+      try {
+        const server = await ensureMcp();
+        const browserStatus = await browser.status();
+        const tunnelStatus = tunnel.status(config);
+        ctx.ui.notify(
+          [
+            "OMP ChatGPT Web provider",
+            "model: " + PROVIDER + "/" + MODEL,
+            "inference: chatgpt.com browser only",
+            "MCP: " + server.url,
+            "connector: " + config.connectorName,
+            "tunnel: " + (tunnelStatus.running
+              ? "running"
+              : tunnelStatus.configured
+                ? "configured/stopped"
+                : "externally managed or unconfigured"),
+            "browser: " + (browserStatus.open ? "open" : "closed"),
+            "active Web turns: " + browserStatus.activeTurns,
+          ].join("\n"),
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("web-tunnel", {
+    description: "Manage OpenAI Secure MCP Tunnel: start | stop | status",
+    handler: async (args, ctx) => {
+      try {
+        const action = args.trim().toLowerCase() || "status";
+        const server = await ensureMcp();
+        if (action === "start") {
+          const status = await tunnel.start(config, server.url);
+          ctx.ui.notify(
+            "Secure MCP Tunnel running" + (status.pid ? " pid=" + status.pid : ""),
+            "info",
+          );
+          return;
+        }
+        if (action === "stop") {
+          await tunnel.stop(config);
+          ctx.ui.notify("Secure MCP Tunnel stopped", "info");
+          return;
+        }
+        if (action !== "status") {
+          ctx.ui.notify("Usage: /web-tunnel start|stop|status", "warning");
+          return;
+        }
+        ctx.ui.notify(
+          JSON.stringify({ ...tunnel.status(config), mcp: server.url }, null, 2),
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      }
+    },
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    ctx.ui.setStatus("omp-chatgpt-web", ctx.ui.theme.fg("accent", "web-backend"));
+  });
+
+  pi.on("session_shutdown", async () => {
+    broker.abortAll();
+    await Promise.allSettled([
+      browser.close(),
+      tunnel.stop(config),
+      mcp?.close() ?? Promise.resolve(),
+    ]);
+    mcp = undefined;
+  });
+}
