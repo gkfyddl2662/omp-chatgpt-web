@@ -49,6 +49,35 @@ test("supports MCP 2026-07-28 server/discover", async (t) => {
   );
 });
 
+
+test("emits 2026-07-28 result envelopes for tools/list and tools/call", async (t) => {
+  const broker = new TurnBroker();
+  const { token } = broker.begin("modern", tools);
+  const server = await createMcpServer({ host: "127.0.0.1", port: 0, broker });
+  t.after(() => server.close());
+
+  const meta = {
+    _meta: {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { name: "ChatGPT", version: "test" },
+      "io.modelcontextprotocol/clientCapabilities": {},
+    },
+  };
+
+  const list = await rpc(server.url, 110, "tools/list", meta);
+  assert.equal(list.result.resultType, "complete");
+  assert.equal(list.result.ttlMs, 0);
+  assert.equal(list.result.cacheScope, "private");
+
+  const inventory = await rpc(server.url, 111, "tools/call", {
+    ...meta,
+    name: "omp_tool_inventory",
+    arguments: { turn_token: token },
+  });
+  assert.equal(inventory.result.resultType, "complete");
+  assert.equal(inventory.result.structuredContent.tools[0].name, "read");
+});
+
 test("fixed MCP ABI inventories and invokes turn-local OMP tools", async (t) => {
   const broker = new TurnBroker({ toolTimeoutMs: 2_000 });
   const { token } = broker.begin("s", tools);
