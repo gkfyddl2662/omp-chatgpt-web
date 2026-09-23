@@ -14,5 +14,6 @@ test("composer insert mode accepts current and legacy direct-editor aliases", ()
 
   assert.equal(normalizeComposerInsertMode("editor"), "editor");
   assert.equal(normalizeComposerInsertMode("lexical"), "editor");
-  assert.equal(normalizeComposerInsertMode(undefined), "default");
+  assert.equal(normalizeComposerInsertMode(undefined), "editor");
+  assert.equal(normalizeComposerInsertMode("default"), "default");
 });
