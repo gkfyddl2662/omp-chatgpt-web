@@ -44,6 +44,7 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
+  insertMode: "paste" | "execCommand" | "cdp";
   submitMs: number;
 }
 
@@ -420,7 +421,11 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     try {
-      await this.#insertComposerText(page, composer, " " + prompt);
+      const insertMode = await this.#insertComposerText(
+        page,
+        composer,
+        " " + prompt,
+      );
       const insertedAt = Date.now();
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page, baselineUsers);
@@ -430,6 +435,7 @@ export class ChatGptBrowserBackend {
         sessionMs: sessionReadyAt - preparationStartedAt,
         mentionMs: mentionReadyAt - sessionReadyAt,
         insertMs: insertedAt - mentionReadyAt,
+        insertMode,
         submitMs: submittedAt - insertedAt,
       };
       session.seeded = true;
@@ -716,16 +722,84 @@ export class ChatGptBrowserBackend {
     return await composer.innerText().catch(() => "");
   }
 
+  #verifyComposerInsertion(
+    before: string,
+    actual: string,
+    text: string,
+  ): boolean {
+    const normalize = (value: string): string =>
+      value
+        .replace(/\u00a0/g, " ")
+        .replace(/\r\n?/g, "\n")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const normalizedPrompt = normalize(text);
+    const normalizedActual = normalize(actual);
+    const fingerprintSize = Math.min(2_048, normalizedPrompt.length);
+    const tail = normalizedPrompt.slice(-fingerprintSize);
+
+    const growth = actual.length - before.length;
+    const minGrowth = Math.floor(text.length * 0.9);
+    const maxGrowth = Math.ceil(text.length * 1.2) + 8_192;
+
+    return (
+      growth >= minGrowth &&
+      growth <= maxGrowth &&
+      (tail.length === 0 || normalizedActual.includes(tail))
+    );
+  }
+
   async #insertComposerText(
-    _page: Page,
+    page: Page,
     composer: Locator,
     text: string,
-  ): Promise<void> {
+  ): Promise<"paste" | "execCommand" | "cdp"> {
     await composer.focus();
     const before = await this.#composerPlainText(composer);
 
-    // One browser editing operation, with no manually-dispatched InputEvent.
-    // ChatGPT/Lexical receives the same prompt string unchanged.
+    // Preferred fast path for large prompts: let ChatGPT/Lexical process one
+    // paste transaction. This does not touch the user's OS clipboard and does
+    // not alter the prompt string.
+    const pasteDispatched = await composer.evaluate((element, value) => {
+      try {
+        const data = new DataTransfer();
+        data.setData("text/plain", String(value));
+        const event = new ClipboardEvent("paste", {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        element.dispatchEvent(event);
+        return true;
+      } catch {
+        return false;
+      }
+    }, text).catch(() => false);
+
+    if (pasteDispatched) {
+      const pasteDeadline = Date.now() + 250;
+      while (Date.now() < pasteDeadline) {
+        const actual = await this.#composerPlainText(composer);
+        if (actual.length !== before.length) {
+          if (!this.#verifyComposerInsertion(before, actual, text)) {
+            throw new Error(
+              "ChatGPT composer prompt verification failed after paste " +
+                "(prompt " + text.length +
+                " chars, composer growth " + (actual.length - before.length) +
+                " chars, total " + actual.length + ").",
+            );
+          }
+          return "paste";
+        }
+        await sleep(15);
+      }
+    }
+
+    // Compatibility path: one browser editing operation, without a manually
+    // dispatched input event. If it reports no mutation, native CDP insertion
+    // is still safe because nothing has been added yet.
     const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
       el.focus();
@@ -740,52 +814,23 @@ export class ChatGptBrowserBackend {
       return document.execCommand("insertText", false, String(value));
     }, text).catch(() => false);
 
+    let mode: "execCommand" | "cdp" = "execCommand";
     if (!inserted) {
-      // execCommand reported that it performed no edit, so a native CDP
-      // insertion is still safe here: there is nothing to duplicate.
       await composer.focus();
-      await _page.keyboard.insertText(text);
+      await page.keyboard.insertText(text);
+      mode = "cdp";
     }
 
     const actual = await this.#composerPlainText(composer);
-
-    // ChatGPT/Lexical rewrites presentation whitespace (newlines, NBSPs and
-    // paragraph boundaries) even when the submitted text is semantically the
-    // same. Verify content after whitespace normalization, while keeping the
-    // actual prompt string completely unchanged.
-    const normalizeForVerification = (value: string): string =>
-      value
-        .replace(/\u00a0/g, " ")
-        .replace(/\r\n?/g, "\n")
-        .replace(/\s+/g, " ")
-        .trim();
-
-    const normalizedPrompt = normalizeForVerification(text);
-    const normalizedActual = normalizeForVerification(actual);
-    const normalizedFingerprintSize = Math.min(
-      2_048,
-      normalizedPrompt.length,
-    );
-    const normalizedTail = normalizedPrompt.slice(
-      -normalizedFingerprintSize,
-    );
-
-    const growth = actual.length - before.length;
-    const minGrowth = Math.floor(text.length * 0.9);
-    const maxGrowth = Math.ceil(text.length * 1.2) + 8_192;
-    const suspiciousGrowth = growth < minGrowth || growth > maxGrowth;
-    const missingTail =
-      normalizedTail.length > 0 &&
-      !normalizedActual.includes(normalizedTail);
-
-    if (suspiciousGrowth || missingTail) {
+    if (!this.#verifyComposerInsertion(before, actual, text)) {
       throw new Error(
         "ChatGPT composer prompt verification failed " +
           "(prompt " + text.length +
-          " chars, composer growth " + growth +
+          " chars, composer growth " + (actual.length - before.length) +
           " chars, total " + actual.length + ").",
       );
     }
+    return mode;
   }
 
   async #mentionSuggestionVisible(
