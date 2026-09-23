@@ -62,7 +62,7 @@ interface BrowserSession {
   seeded: boolean;
 }
 
-type BrowserPreparationKind = "turn" | "retained-compaction";
+type BrowserPreparationKind = "turn" | "retained-compaction" | "fresh-compaction";
 
 interface ComposerInsertionTiming {
   mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
@@ -692,6 +692,53 @@ export class ChatGptBrowserBackend {
     await this.#releasePageWithoutStoppingBrowser(previousPage);
   }
 
+  async compactSessionWhenIdle(
+    sessionKey: string,
+    prompts: { retained: string; fresh: string },
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const previous = this.#compactionBarriers.get(sessionKey);
+    if (previous) await previous;
+
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    this.#compactionBarriers.set(sessionKey, barrier);
+
+    try {
+      await this.waitForTurnIdle(sessionKey, signal);
+
+      // Prefer the short retained-thread compaction whenever that conversation
+      // survived. If the browser turn was invalidated (for example after a
+      // ChatGPT timeout), OMP's compaction side request still contains the full
+      // source conversation. Run that dedicated maintenance prompt in a fresh
+      // Temporary Chat instead of falling back to a different model or replaying
+      // the ordinary agent turn.
+      if (this.hasRetainedConversation(sessionKey)) {
+        return await this.compactRetainedSession(
+          sessionKey,
+          prompts.retained,
+          config,
+          signal,
+        );
+      }
+
+      return await this.compactFreshSession(
+        sessionKey,
+        prompts.fresh,
+        config,
+        signal,
+      );
+    } finally {
+      release();
+      if (this.#compactionBarriers.get(sessionKey) === barrier) {
+        this.#compactionBarriers.delete(sessionKey);
+      }
+    }
+  }
+
   async compactRetainedSessionWhenIdle(
     sessionKey: string,
     prompt: string,
@@ -820,6 +867,106 @@ export class ChatGptBrowserBackend {
       // rewrites its history after accepting that summary. Prepare a fresh
       // replacement Temporary Chat before retiring the old thread so Chrome
       // never has to close/relaunch between handoff and the next ordinary turn.
+      await this.#resetSessionPage(sessionKey, config);
+      return summary;
+    } catch (error) {
+      await this.invalidateSession(sessionKey);
+      throw error;
+    }
+  }
+
+
+  async compactFreshSession(
+    sessionKey: string,
+    prompt: string,
+    config: RuntimeConfig,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (this.#turns.has(sessionKey)) {
+      throw new Error(
+        "Cannot submit fresh Web compaction while the ChatGPT turn is still active.",
+      );
+    }
+
+    const existing = this.#sessions.get(sessionKey);
+    if (
+      existing &&
+      existing.seeded &&
+      !existing.page.isClosed() &&
+      this.#browser?.isConnected()
+    ) {
+      throw new Error(
+        "Fresh Web compaction refused to replace a usable retained ChatGPT conversation.",
+      );
+    }
+
+    const preparationStartedAt = Date.now();
+    const session = await this.#session(sessionKey, config);
+    if (session.seeded) {
+      throw new Error(
+        "Fresh Web compaction requires an unseeded Temporary Chat.",
+      );
+    }
+
+    const page = session.page;
+    let composer = await this.#requireComposer(page);
+    composer = await this.#prepareCompactionComposer(
+      page,
+      composer,
+      config.connectorName,
+    );
+    const composerReadyAt = Date.now();
+
+    const baselineAssistants = await page
+      .locator('[data-message-author-role="assistant"]')
+      .count()
+      .catch(() => 0);
+    const baselineUsers = await page
+      .locator('[data-message-author-role="user"]')
+      .count()
+      .catch(() => 0);
+    const errorBaseline = await this.#chatErrorBaseline(page);
+
+    try {
+      const insertion = await this.#insertComposerText(
+        page,
+        composer,
+        prompt,
+        config.insertMode,
+      );
+      const insertedAt = Date.now();
+
+      await composer.press("Enter");
+      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      const submittedAt = Date.now();
+      this.#lastPreparation = {
+        kind: "fresh-compaction",
+        promptChars: prompt.length,
+        sessionMs: composerReadyAt - preparationStartedAt,
+        mentionMs: 0,
+        insertMs: insertedAt - composerReadyAt,
+        insertMode: insertion.mode,
+        ...(insertion.detail ? { insertDetail: insertion.detail } : {}),
+        insertEditMs: insertion.editMs,
+        insertVerifyMs: insertion.verifyMs,
+        submitMs: submittedAt - insertedAt,
+      };
+
+      const summary = assertValidCompactionSummary(
+        await this.#waitForAssistantText(
+          page,
+          config.turnTimeoutMs,
+          signal,
+          baselineAssistants,
+          errorBaseline,
+        ),
+        prompt,
+      );
+
+      // This page contains only the one-off OMP maintenance side request.
+      // OMP rewrites its canonical history after accepting the summary, so the
+      // next ordinary turn must start on another clean Temporary Chat and seed
+      // the compacted OMP context there.
       await this.#resetSessionPage(sessionKey, config);
       return summary;
     } catch (error) {
