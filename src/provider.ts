@@ -12,7 +12,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { RuntimeConfig } from "./config.js";
 import {
-  compileCompactionPrompt,
+  assertValidCompactionSummary,
   compileRetainedCompactionPrompt,
   isOmpCompactionContext,
 } from "./compaction.js";
@@ -243,40 +243,42 @@ export class WebModelProvider {
 
       if (isOmpCompactionContext(context, options)) {
         try {
-          let summary: string;
-
-          if (this.#browser.hasSession(conversation)) {
-            // Never open a second compaction tab while the retained ChatGPT
-            // conversation is still active. Reserve this conversation epoch,
-            // let the foreground turn finish, compact the same thread, then
-            // reset that same tab before allowing another ordinary turn.
-            if (
-              this.#browser.hasRetainedConversation(conversation) ||
-              this.#browser.isTurnActive(conversation)
-            ) {
-              summary = await this.#browser.compactRetainedSessionWhenIdle(
-                conversation,
-                compileRetainedCompactionPrompt(context),
-                this.#config,
-                signal,
-              );
-            } else {
-              // The retained session disappeared while we were waiting (for
-              // example, browser closure or a failed turn). Only then fall back
-              // to a standalone text-only compaction request.
-              summary = await this.#browser.runTextOnly(
-                compileCompactionPrompt(context),
-                this.#config,
-                signal,
-              );
-            }
-          } else {
-            summary = await this.#browser.runTextOnly(
-              compileCompactionPrompt(context),
-              this.#config,
-              signal,
+          // Compaction is history-destructive in OMP: once a summary is
+          // accepted, the old context is replaced. Never "salvage" a missing
+          // retained browser thread by replaying the entire OMP history into a
+          // fresh ChatGPT tab. A browser/server failure must remain a provider
+          // error so OMP keeps the original history intact.
+          if (
+            !this.#browser.hasSession(conversation) &&
+            !this.#browser.isTurnActive(conversation)
+          ) {
+            throw new Error(
+              "Cannot compact safely because the retained ChatGPT conversation is unavailable. " +
+                "Refusing full-context fallback so OMP does not commit a false compaction.",
             );
           }
+
+          if (
+            !this.#browser.hasRetainedConversation(conversation) &&
+            !this.#browser.isTurnActive(conversation)
+          ) {
+            throw new Error(
+              "Cannot compact safely because the retained ChatGPT conversation is not seeded. " +
+                "OMP history was left unchanged.",
+            );
+          }
+
+          const retainedPrompt = compileRetainedCompactionPrompt(context);
+          const rawSummary = await this.#browser.compactRetainedSessionWhenIdle(
+            conversation,
+            retainedPrompt,
+            this.#config,
+            signal,
+          );
+          const summary = assertValidCompactionSummary(
+            rawSummary,
+            retainedPrompt,
+          );
 
           pushText(stream, model, summary);
         } catch (error) {
