@@ -468,6 +468,13 @@ export class ChatGptBrowserBackend {
         " " + prompt,
         config.insertMode,
       );
+      if (!(await this.#selectedConnectorIsExact(composer, config.connectorName))) {
+        throw new Error(
+          'ChatGPT lost the exact connector "' +
+            config.connectorName +
+            '" while inserting the provider prompt.',
+        );
+      }
       insertedAt = Date.now();
     } catch (error) {
       await this.#recoverUnsubmittedTurn(sessionKey, composer);
@@ -1055,10 +1062,15 @@ export class ChatGptBrowserBackend {
             };
           }
 
+          // Insert after the current selection rather than replacing it.
+          // If ChatGPT leaves the connector pill as a ProseMirror NodeSelection,
+          // selection.to is the position immediately after that atom, so the
+          // app pill remains attached.
+          const insertionPos = latestSelection.to;
           const next = latestTransaction.insertText(
             String(value),
-            latestSelection.from,
-            latestSelection.to,
+            insertionPos,
+            insertionPos,
           );
           dispatchStarted = true;
           view.dispatch(next);
@@ -1188,7 +1200,7 @@ export class ChatGptBrowserBackend {
           mode = "lexical";
           detail = lexical.reason;
         } else {
-          detail = detail + ";" + lexical.reason;
+          detail = (detail ? detail + ";" : "") + lexical.reason;
         }
       }
     }
