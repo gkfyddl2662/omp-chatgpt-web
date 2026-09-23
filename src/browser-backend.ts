@@ -43,7 +43,7 @@ export class ChatGptBrowserBackend {
         "--user-data-dir=" + config.browserProfileDir,
         "--no-first-run",
         "--no-default-browser-check",
-        "about:blank",
+        "https://chatgpt.com/",
       ],
       {
         detached: true,
@@ -73,7 +73,7 @@ export class ChatGptBrowserBackend {
         "--user-data-dir=" + config.browserProfileDir,
         "--no-first-run",
         "--no-default-browser-check",
-        "https://chatgpt.com/",
+        "about:blank",
       ],
       {
         detached: true,
@@ -136,6 +136,27 @@ export class ChatGptBrowserBackend {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const context = await this.#connect(config);
+        const activePages = new Set(
+          [...this.#turns.values()]
+            .map(turn => turn.page)
+            .filter(page => !page.isClosed()),
+        );
+
+        // Chrome always opens one startup tab. Reuse that tab instead of
+        // creating another visible tab. Also clean up stale restored/idle tabs
+        // that do not belong to a live OMP turn.
+        const idlePages = context.pages().filter(
+          page => !page.isClosed() && !activePages.has(page),
+        );
+
+        const reusable = idlePages[0];
+        if (reusable) {
+          await Promise.allSettled(
+            idlePages.slice(1).map(page => page.close()),
+          );
+          return reusable;
+        }
+
         return await context.newPage();
       } catch (error) {
         lastError = error;
@@ -252,7 +273,6 @@ export class ChatGptBrowserBackend {
       if (signal?.aborted) {
         throw signal.reason ?? new DOMException("Text-only Web request aborted", "AbortError");
       }
-      await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
       const composer = await this.#requireComposer(page);
       await this.#assertNoConnectorSelected(page, composer, config.connectorName);
       await composer.fill(prompt);
