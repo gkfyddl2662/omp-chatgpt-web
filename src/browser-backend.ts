@@ -640,78 +640,35 @@ export class ChatGptBrowserBackend {
   }
 
   async #insertComposerText(
-    page: Page,
+    _page: Page,
     composer: Locator,
     text: string,
   ): Promise<void> {
     await composer.focus();
-
-    // Fast path: update the editable DOM in one mutation and emit exactly one
-    // input event. This keeps the prompt text unchanged while avoiding the
-    // multi-second per-character/editor reconciliation cost observed with
-    // CDP Input.insertText on very large OMP prompts.
     const before = await this.#composerPlainText(composer);
     const expected = before + text;
 
-    const fastApplied = await composer.evaluate((element, value) => {
+    // One browser editing operation, with no manually-dispatched InputEvent.
+    // ChatGPT/Lexical receives the same prompt string unchanged.
+    const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
       el.focus();
 
-      // Preserve existing mention/pill DOM. Append one text node after it.
-      const node = document.createTextNode(String(value));
-      el.appendChild(node);
-
       const selection = window.getSelection();
       const range = document.createRange();
-      range.setStartAfter(node);
-      range.collapse(true);
+      range.selectNodeContents(el);
+      range.collapse(false);
       selection?.removeAllRanges();
       selection?.addRange(range);
 
-      el.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        composed: true,
-        inputType: "insertText",
-        data: String(value),
-      }));
-
-      return true;
+      return document.execCommand("insertText", false, String(value));
     }, text).catch(() => false);
 
-    if (fastApplied) {
-      // Give ChatGPT/Lexical one frame to reconcile, then verify the exact
-      // visible composer text before allowing submission.
-      await page.evaluate(() => new Promise<void>(resolve =>
-        requestAnimationFrame(() => resolve())
-      )).catch(() => undefined);
-
-      const actual = await this.#composerPlainText(composer);
-      if (actual === expected) return;
-
-      // Roll back only the exact text node we appended. Preserve the existing
-      // @OMP Local mention/pill DOM before falling back.
-      await composer.evaluate((element, value) => {
-        const el = element as HTMLElement;
-        const last = el.lastChild;
-        if (
-          last?.nodeType === Node.TEXT_NODE &&
-          last.nodeValue === String(value)
-        ) {
-          last.remove();
-          el.dispatchEvent(new InputEvent("input", {
-            bubbles: true,
-            composed: true,
-            inputType: "deleteContentBackward",
-            data: null,
-          }));
-        }
-      }, text).catch(() => undefined);
+    if (!inserted) {
+      throw new Error(
+        "ChatGPT composer rejected the single-operation prompt insertion.",
+      );
     }
-
-    // Compatibility fallback: the current ChatGPT editor rejected or rewrote
-    // the direct DOM mutation. Use the native CDP text insertion path.
-    await composer.focus();
-    await page.keyboard.insertText(text);
 
     const actual = await this.#composerPlainText(composer);
     if (actual !== expected) {
