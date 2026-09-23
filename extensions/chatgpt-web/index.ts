@@ -16,52 +16,139 @@ const MODEL = "web";
 const API = "chatgpt-web";
 const LOCAL_SENTINEL_KEY = "omp-chatgpt-web-local-transport";
 
-export default function chatGptWebExtension(pi: ExtensionAPI) {
-  const config = loadRuntimeConfig();
-  const broker = new TurnBroker();
-  const browser = new ChatGptBrowserBackend();
-  const tunnel = new TunnelSupervisor();
-  let mcp: McpServerHandle | undefined;
-  let mcpStarting: Promise<McpServerHandle> | undefined;
+const sharedConfig = loadRuntimeConfig();
+const sharedBroker = new TurnBroker();
+const sharedBrowser = new ChatGptBrowserBackend();
+const sharedTunnel = new TunnelSupervisor();
+const sharedConversationOwners = new Map<string, number>();
 
-  async function ensureMcp(): Promise<McpServerHandle> {
-    if (mcp) return mcp;
-    if (!mcpStarting) {
-      mcpStarting = createMcpServer({
-        host: config.mcpHost,
-        port: config.mcpPort,
-        broker,
-      }).then(handle => {
-        mcp = handle;
-        return handle;
-      }).finally(() => {
-        mcpStarting = undefined;
+let sharedMcp: McpServerHandle | undefined;
+let sharedMcpStarting: Promise<McpServerHandle> | undefined;
+let sharedTunnelStarting: Promise<ReturnType<TunnelSupervisor["status"]>> | undefined;
+let sharedBindingCount = 0;
+let sharedClosePromise: Promise<void> | undefined;
+
+async function ensureSharedMcp(): Promise<McpServerHandle> {
+  if (sharedMcp) return sharedMcp;
+  if (!sharedMcpStarting) {
+    sharedMcpStarting = createMcpServer({
+      host: sharedConfig.mcpHost,
+      port: sharedConfig.mcpPort,
+      broker: sharedBroker,
+    }).then(handle => {
+      sharedMcp = handle;
+      return handle;
+    }).finally(() => {
+      sharedMcpStarting = undefined;
+    });
+  }
+  return await sharedMcpStarting;
+}
+
+async function startSharedTunnel(): Promise<ReturnType<TunnelSupervisor["status"]>> {
+  const server = await ensureSharedMcp();
+  const current = sharedTunnel.status(sharedConfig);
+  if (current.running && current.ready) return current;
+
+  if (!sharedTunnelStarting) {
+    sharedTunnelStarting = sharedTunnel
+      .start(sharedConfig, server.url)
+      .finally(() => {
+        sharedTunnelStarting = undefined;
       });
-    }
-    return await mcpStarting;
   }
+  return await sharedTunnelStarting;
+}
 
-  async function ensureTransport(): Promise<void> {
-    const server = await ensureMcp();
-    const status = tunnel.status(config);
-    if (status.running) return;
-    if (tunnelConfigured(config)) {
-      await tunnel.start(config, server.url);
-    }
+async function ensureSharedTransport(): Promise<void> {
+  await ensureSharedMcp();
+  if (tunnelConfigured(sharedConfig)) {
+    await startSharedTunnel();
   }
+}
 
-  const provider = new WebModelProvider({
-    config,
-    broker,
-    browser,
-    ensureTransport,
+const sharedProvider = new WebModelProvider({
+  config: sharedConfig,
+  broker: sharedBroker,
+  browser: sharedBrowser,
+  ensureTransport: ensureSharedTransport,
+});
+
+function retainSharedConversation(key: string): void {
+  sharedConversationOwners.set(
+    key,
+    (sharedConversationOwners.get(key) ?? 0) + 1,
+  );
+}
+
+async function releaseSharedConversation(key: string): Promise<void> {
+  const owners = sharedConversationOwners.get(key) ?? 0;
+  if (owners > 1) {
+    sharedConversationOwners.set(key, owners - 1);
+    return;
+  }
+  sharedConversationOwners.delete(key);
+  await sharedBrowser.invalidateSession(key).catch(() => undefined);
+}
+
+async function closeSharedRuntimeIfUnused(): Promise<void> {
+  if (sharedBindingCount !== 0) return;
+  if (sharedClosePromise) return await sharedClosePromise;
+
+  sharedClosePromise = (async () => {
+    // Yield once so a replacement/rebound session can claim the shared runtime
+    // before we tear it down.
+    await Promise.resolve();
+    if (sharedBindingCount !== 0) return;
+
+    sharedBroker.abortAll();
+    if (sharedTunnelStarting) {
+      await sharedTunnelStarting.catch(() => undefined);
+    }
+    await Promise.allSettled([
+      sharedBrowser.close(),
+      sharedTunnel.stop(sharedConfig),
+      sharedMcp?.close() ?? Promise.resolve(),
+    ]);
+    sharedMcp = undefined;
+    sharedConversationOwners.clear();
+  })().finally(() => {
+    sharedClosePromise = undefined;
   });
+
+  await sharedClosePromise;
+}
+
+export default function chatGptWebExtension(pi: ExtensionAPI) {
+  const config = sharedConfig;
+  const broker = sharedBroker;
+  const browser = sharedBrowser;
+  const tunnel = sharedTunnel;
+  const ownedConversations = new Set<string>();
+  const ownedRequests = new Set<string>();
+  let bindingStarted = false;
+  let bindingReleased = false;
 
   pi.registerProvider(PROVIDER, {
     baseUrl: "http://127.0.0.1/omp-chatgpt-web",
     apiKey: LOCAL_SENTINEL_KEY,
     api: API,
-    streamSimple: provider.streamSimple,
+    streamSimple: (model, context, options) => {
+      const request =
+        options?.sessionId?.trim() ||
+        options?.promptCacheKey?.trim();
+      const conversation =
+        options?.promptCacheKey?.trim() ||
+        options?.sessionId?.trim();
+
+      if (request) ownedRequests.add(request);
+      if (conversation && !ownedConversations.has(conversation)) {
+        ownedConversations.add(conversation);
+        retainSharedConversation(conversation);
+      }
+
+      return sharedProvider.streamSimple(model, context, options);
+    },
     models: [{
       id: MODEL,
       name: "ChatGPT Web",
@@ -221,7 +308,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     description: "Show ChatGPT Web provider, MCP, browser, and tunnel status",
     handler: async (_args, ctx) => {
       try {
-        const server = await ensureMcp();
+        const server = await ensureSharedMcp();
         const browserStatus = await browser.status(config);
         const tunnelStatus = tunnel.status(config);
         ctx.ui.notify(
@@ -242,15 +329,11 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             "retained sessions: " + browserStatus.retainedSessions,
             "active Web turns: " + browserStatus.activeTurns,
             "pending compactions: " + browserStatus.pendingCompactions,
-            ...(browserStatus.urls.length
-              ? ["retained url: " + browserStatus.urls[0]]
-              : []),
+            "shared Web sessions: " + sharedBindingCount,
             ...(browserStatus.lastPreparation
               ? [
                   "last prompt chars: " + browserStatus.lastPreparation.promptChars,
                   "prep ms: session=" + browserStatus.lastPreparation.sessionMs +
-                    " rehydrate=" + browserStatus.lastPreparation.rehydrateMs +
-                    " (eligible=" + browserStatus.lastPreparation.rehydrateEligible + ")" +
                     " mention=" + browserStatus.lastPreparation.mentionMs +
                     " insert=" + browserStatus.lastPreparation.insertMs +
                     " (mode=" + browserStatus.lastPreparation.insertMode +
@@ -273,9 +356,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       try {
         const action = args.trim().toLowerCase() || "status";
-        const server = await ensureMcp();
+        const server = await ensureSharedMcp();
         if (action === "start") {
-          const status = await tunnel.start(config, server.url);
+          const status = await startSharedTunnel();
           ctx.ui.notify(
             "Secure MCP Tunnel ready" +
               (status.pid ? " pid=" + status.pid : "") +
@@ -312,17 +395,41 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.on("before_subagent_spawn", (event, ctx) => {
+    const current = ctx.models.current() ?? ctx.model;
+    if (current?.provider !== PROVIDER || current.id !== MODEL) return;
+
+    return {
+      model: PROVIDER + "/" + MODEL,
+      note:
+        "OMP ChatGPT Web routes this subagent through the same shared Web runtime " +
+        "with an independent ChatGPT Temporary Chat tab.",
+    };
+  });
+
   pi.on("session_start", async (_event, ctx) => {
+    if (!bindingStarted) {
+      bindingStarted = true;
+      sharedBindingCount += 1;
+    }
     ctx.ui.setStatus("omp-chatgpt-web", ctx.ui.theme.fg("accent", "web-backend"));
   });
 
   pi.on("session_shutdown", async () => {
-    broker.abortAll();
-    await Promise.allSettled([
-      browser.close(),
-      tunnel.stop(config),
-      mcp?.close() ?? Promise.resolve(),
-    ]);
-    mcp = undefined;
+    if (bindingReleased) return;
+    bindingReleased = true;
+
+    for (const request of ownedRequests) broker.end(request);
+    ownedRequests.clear();
+
+    await Promise.allSettled(
+      [...ownedConversations].map(key => releaseSharedConversation(key)),
+    );
+    ownedConversations.clear();
+
+    if (bindingStarted) {
+      sharedBindingCount = Math.max(0, sharedBindingCount - 1);
+    }
+    await closeSharedRuntimeIfUnused();
   });
 }
