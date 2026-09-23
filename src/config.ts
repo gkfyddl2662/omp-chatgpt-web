@@ -19,7 +19,6 @@ export interface RuntimeConfig {
   browserProfileDir: string;
   browserExecutable?: string;
   browserCdpPort: number;
-  headed: boolean;
   autoApproveToolCalls: boolean;
   turnTimeoutMs: number;
   tunnelClientBin: string;
@@ -197,7 +196,6 @@ export function loadRuntimeConfig(): RuntimeConfig {
     browserCdpPort: Math.floor(
       persisted.browserCdpPort ?? envNumber("OMP_CHATGPT_WEB_CDP_PORT", 9222),
     ),
-    headed: envBoolean("OMP_CHATGPT_WEB_HEADED", true),
     autoApproveToolCalls: envBoolean("OMP_CHATGPT_WEB_AUTO_APPROVE", false),
     turnTimeoutMs: Math.floor(envNumber("OMP_CHATGPT_WEB_TURN_TIMEOUT_MS", 15 * 60_000)),
     tunnelClientBin:
@@ -206,10 +204,6 @@ export function loadRuntimeConfig(): RuntimeConfig {
     tunnelId: persisted.tunnelId || process.env.CONTROL_PLANE_TUNNEL_ID?.trim() || undefined,
     tunnelApiKey: persisted.tunnelApiKey || process.env.CONTROL_PLANE_API_KEY?.trim() || undefined,
   };
-}
-
-export function mcpServerUrl(config: RuntimeConfig): string {
-  return "http://" + config.mcpHost + ":" + config.mcpPort + "/mcp";
 }
 
 export function tunnelConfigured(config: RuntimeConfig): boolean {
