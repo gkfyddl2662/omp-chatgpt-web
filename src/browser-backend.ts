@@ -749,10 +749,26 @@ export class ChatGptBrowserBackend {
     }
 
     const actual = await this.#composerPlainText(composer);
-    if (actual !== expected) {
+
+    // ChatGPT may expand the attached app pill into extra accessibility/UI text
+    // inside the composer after ordinary text is inserted. That makes whole-
+    // composer equality a false positive even when the prompt itself is intact.
+    // Verify the inserted payload by content fingerprint and bounded growth
+    // instead. This still catches the earlier ~2x duplicate-insertion failure.
+    const fingerprintSize = Math.min(2_048, text.length);
+    const tailFingerprint = text.slice(-fingerprintSize);
+    const growth = actual.length - before.length;
+    const uiOverheadAllowance = 8_192;
+    const suspiciouslyShort = growth < Math.max(0, text.length - 256);
+    const suspiciouslyLong = growth > text.length + uiOverheadAllowance;
+    const missingTail = tailFingerprint.length > 0 && !actual.includes(tailFingerprint);
+
+    if (suspiciouslyShort || suspiciouslyLong || missingTail) {
       throw new Error(
-        "ChatGPT composer text changed during prompt insertion " +
-          "(expected " + expected.length + " chars, got " + actual.length + ").",
+        "ChatGPT composer prompt verification failed " +
+          "(prompt " + text.length +
+          " chars, composer growth " + growth +
+          " chars, total " + actual.length + ").",
       );
     }
   }
