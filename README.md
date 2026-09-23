@@ -175,6 +175,25 @@ reconstruct safely.
 The prompt contract itself is preserved between turns; performance work is
 limited to browser transport and retained-session behavior.
 
+### Long-turn browser failure recovery
+
+Ordinary Web turns continuously watch for a new ChatGPT error/retry surface,
+including the Korean `메시지 전송 시간이 초과되었습니다` state. The provider
+does **not** click ChatGPT's Retry button for these failures: a long OMP turn may
+already have executed side-effecting tools, so replaying the browser turn could
+repeat completed work.
+
+Instead, the active Web turn is ended with a replay-suppressed, non-retryable
+OMP error and the broken retained browser conversation is discarded. OMP keeps
+the tool results and repository state it already recorded. If an OMP Goal is
+still active, its normal hidden Goal continuation owns the next turn; OMP runs
+its pre-prompt context maintenance first, so an oversized context can Auto-shake
+or compact before a fresh ChatGPT Temporary Chat receives the continuation.
+
+This is intentionally different from compaction itself: retained compaction may
+use ChatGPT's native Retry once for the same summary request, but an ordinary
+agent turn is never browser-retried automatically.
+
 ## Task agents and subagents
 
 When the current parent model is `chatgpt-web/web`, the extension's

@@ -28,8 +28,31 @@ async function firstVisible(
   return undefined;
 }
 
+type ChatErrorBaseline = {
+  retryCount: number;
+  errorTextCount: number;
+};
+
+const CHAT_ERROR_RETRY_BUTTON_RE = /Retry|Try again|다시 시도/i;
+const CHAT_ERROR_TEXT_RE =
+  /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다|메시지 전송 시간이 초과되었습니다|다시 시도해 주세요/i;
+
+export class ChatGptReplayUnsafeTurnError extends Error {
+  readonly browserMessage: string;
+
+  constructor(browserMessage: string) {
+    super(
+      "ChatGPT Web ended the browser turn before OMP completion. " +
+        "Automatic replay was suppressed to preserve already-completed OMP tool work.",
+    );
+    this.name = "ChatGptReplayUnsafeTurnError";
+    this.browserMessage = browserMessage;
+  }
+}
+
 interface BrowserTurn {
   page: Page;
+  errorBaseline: ChatErrorBaseline;
   approvalTimer?: ReturnType<typeof setInterval>;
   settling?: Promise<void>;
 }
@@ -378,6 +401,50 @@ export class ChatGptBrowserBackend {
     return this.#turns.has(sessionKey);
   }
 
+  async waitForTurnFailure(
+    sessionKey: string,
+    signal?: AbortSignal,
+  ): Promise<never> {
+    const turn = this.#turns.get(sessionKey);
+    if (!turn) {
+      throw new Error(
+        "Cannot monitor ChatGPT browser failure without an active Web turn.",
+      );
+    }
+
+    for (;;) {
+      if (signal?.aborted) {
+        throw signal.reason ??
+          new DOMException("ChatGPT browser failure monitor aborted", "AbortError");
+      }
+
+      // If another path finished the turn first, stay dormant until the caller
+      // cancels this monitor. This keeps Promise.race from turning a successful
+      // MCP action into a spurious provider failure during teardown.
+      if (this.#turns.get(sessionKey) !== turn) {
+        await sleep(100);
+        continue;
+      }
+
+      if (turn.page.isClosed()) {
+        throw new ChatGptReplayUnsafeTurnError("ChatGPT tab was closed.");
+      }
+
+      const errorState = await this.#chatErrorState(
+        turn.page,
+        turn.errorBaseline,
+      );
+      if (errorState) {
+        // Never click ChatGPT's Retry button for an ordinary OMP turn. A long
+        // agent turn may already have completed side-effecting tools, so replay
+        // must be delegated to OMP's state-aware continuation machinery.
+        throw new ChatGptReplayUnsafeTurnError(errorState.message);
+      }
+
+      await sleep(250);
+    }
+  }
+
   async status(config?: RuntimeConfig): Promise<{
     open: boolean;
     attached: boolean;
@@ -486,7 +553,8 @@ export class ChatGptBrowserBackend {
     }
     const mentionReadyAt = Date.now();
 
-    const turn: BrowserTurn = { page };
+    const errorBaseline = await this.#chatErrorBaseline(page);
+    const turn: BrowserTurn = { page, errorBaseline };
     this.#turns.set(sessionKey, turn);
 
     if (config.autoApproveToolCalls) {
@@ -1534,16 +1602,11 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #chatErrorBaseline(page: Page): Promise<{
-    retryCount: number;
-    errorTextCount: number;
-  }> {
+  async #chatErrorBaseline(page: Page): Promise<ChatErrorBaseline> {
     const retryButtons = page.getByRole("button", {
-      name: /Retry|Try again|다시 시도/i,
+      name: CHAT_ERROR_RETRY_BUTTON_RE,
     });
-    const errorText = page.getByText(
-      /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다/i,
-    );
+    const errorText = page.getByText(CHAT_ERROR_TEXT_RE);
     return {
       retryCount: await retryButtons.count().catch(() => 0),
       errorTextCount: await errorText.count().catch(() => 0),
@@ -1552,17 +1615,15 @@ export class ChatGptBrowserBackend {
 
   async #chatErrorState(
     page: Page,
-    baseline?: { retryCount: number; errorTextCount: number },
+    baseline?: ChatErrorBaseline,
   ): Promise<{
     message: string;
     retry?: Locator;
   } | undefined> {
     const retryButtons = page.getByRole("button", {
-      name: /Retry|Try again|다시 시도/i,
+      name: CHAT_ERROR_RETRY_BUTTON_RE,
     });
-    const errorTexts = page.getByText(
-      /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다/i,
-    );
+    const errorTexts = page.getByText(CHAT_ERROR_TEXT_RE);
 
     const retryCount = await retryButtons.count().catch(() => 0);
     const errorTextCount = await errorTexts.count().catch(() => 0);
@@ -1645,7 +1706,7 @@ export class ChatGptBrowserBackend {
     timeoutMs: number,
     signal?: AbortSignal,
     baselineAssistantTurns = 0,
-    errorBaseline?: { retryCount: number; errorTextCount: number },
+    errorBaseline?: ChatErrorBaseline,
   ): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     let lastText = "";
