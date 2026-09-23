@@ -103,3 +103,74 @@ export function compileRetainedCompactionPrompt(context: Context): string {
     request || "Summarize the retained conversation according to the OMP compaction system instructions above.",
   ].join("\n");
 }
+
+
+const COMPACTION_ERROR_PATTERNS = [
+  /Something went wrong/i,
+  /If this issue persists/i,
+  /please contact us through our help center/i,
+  /help\.openai\.com/i,
+  /다시 시도/,
+  /문제가 발생했습니다/,
+  /오류가 발생했습니다/,
+];
+
+const COMPACTION_PROMPT_ECHO_MARKERS = [
+  "This is a text-only OMP context-maintenance request (compaction/handoff).",
+  "This is an OMP context-compaction request for the SAME ChatGPT conversation you have been using as the model backend.",
+  "OMP COMPACTION SYSTEM INSTRUCTIONS",
+  "OMP COMPACTION REQUEST",
+];
+
+export function assertValidCompactionSummary(
+  summary: string,
+  sourcePrompt?: string,
+): string {
+  const trimmed = summary.trim();
+  if (!trimmed) {
+    throw new Error("ChatGPT compaction returned no summary text.");
+  }
+
+  for (const pattern of COMPACTION_ERROR_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      throw new Error(
+        "ChatGPT compaction returned a browser/server error instead of a summary.",
+      );
+    }
+  }
+
+  const echoedMarkers = COMPACTION_PROMPT_ECHO_MARKERS.filter(marker =>
+    trimmed.includes(marker)
+  );
+  if (echoedMarkers.length > 0) {
+    throw new Error(
+      "ChatGPT compaction echoed the maintenance prompt instead of returning a summary.",
+    );
+  }
+
+  if (sourcePrompt) {
+    const normalize = (value: string): string =>
+      value.replace(/\s+/g, " ").trim();
+    const normalizedSource = normalize(sourcePrompt);
+    const normalizedSummary = normalize(trimmed);
+
+    if (
+      normalizedSource.length >= 2_048 &&
+      normalizedSummary.length >= Math.floor(normalizedSource.length * 0.8)
+    ) {
+      const fingerprintSize = Math.min(4_096, normalizedSource.length);
+      const head = normalizedSource.slice(0, fingerprintSize);
+      const tail = normalizedSource.slice(-fingerprintSize);
+      if (
+        normalizedSummary.includes(head) ||
+        normalizedSummary.includes(tail)
+      ) {
+        throw new Error(
+          "ChatGPT compaction appears to have echoed the source prompt instead of summarizing it.",
+        );
+      }
+    }
+  }
+
+  return trimmed;
+}
