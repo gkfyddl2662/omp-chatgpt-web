@@ -363,8 +363,7 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     try {
-      await composer.click();
-      await page.keyboard.insertText(" " + prompt);
+      await this.#insertComposerText(composer, " " + prompt);
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page, baselineUsers);
       session.seeded = true;
@@ -598,21 +597,51 @@ export class ChatGptBrowserBackend {
     );
   }
 
+  async #insertComposerText(
+    composer: Locator,
+    text: string,
+  ): Promise<void> {
+    await composer.evaluate((element, value) => {
+      const el = element as HTMLElement;
+      el.focus();
+
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+
+      const inserted = document.execCommand("insertText", false, String(value));
+      if (!inserted) {
+        const node = document.createTextNode(String(value));
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        el.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: String(value),
+        }));
+      }
+    }, text);
+  }
+
   async #mentionConnector(
     page: Page,
     composer: Locator,
     connectorName: string,
   ): Promise<void> {
-    await composer.click();
-    await page.keyboard.press("Control+A").catch(() => undefined);
-    await page.keyboard.press("Backspace").catch(() => undefined);
-
     const mentionQuery =
       connectorName.trim().split(/\s+/)[0] || connectorName;
-    // ChatGPT's contenteditable can duplicate characters when synthetic
-    // keydown/keypress sequences are used over CDP (e.g. "@@OOMMPP").
-    // insertText emits a single text insertion instead.
-    await page.keyboard.insertText("@" + mentionQuery);
+
+    // Avoid Playwright/CDP keyboard text injection here. On some ChatGPT
+    // composer builds it is observed twice. fill() uses the editable element's
+    // input semantics directly and should leave exactly one "@OMP" query.
+    await composer.fill("@" + mentionQuery);
     await sleep(150);
 
     const currentMentionText = (
@@ -621,10 +650,8 @@ export class ChatGptBrowserBackend {
     ).trim();
 
     if (currentMentionText !== "@" + mentionQuery) {
-      await composer.click();
-      await page.keyboard.press("Control+A").catch(() => undefined);
-      await page.keyboard.press("Backspace").catch(() => undefined);
-      await page.keyboard.insertText("@" + mentionQuery);
+      await composer.fill("");
+      await composer.fill("@" + mentionQuery);
       await sleep(150);
     }
 
