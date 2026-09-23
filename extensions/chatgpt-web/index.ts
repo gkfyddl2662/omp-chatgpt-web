@@ -385,6 +385,8 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { connectorName: "" });
           } else if (key === "browser") {
             applyRuntimeConfigPatch(config, { browserExecutable: "" });
+          } else if (key === "subagents") {
+            resetSubagentLimit(config);
           } else {
             applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
           }
@@ -475,6 +477,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "browser: " + (config.browserExecutable || "(auto)"),
               "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
+              "subagents: " + (config.subagentLimit < 0 ? "unlimited" : config.subagentLimit),
             ].join("\n"),
             "info",
           );
