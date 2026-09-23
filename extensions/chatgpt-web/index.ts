@@ -74,9 +74,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     description: "Open the persistent ChatGPT Web browser profile for sign-in and connector setup",
     handler: async (_args, ctx) => {
       try {
-        await browser.open(config);
+        await browser.openLogin(config);
         ctx.ui.notify(
-          'ChatGPT Web opened. Sign in and ensure the "' + config.connectorName + '" Tunnel connector is available.',
+          'Chrome opened with the dedicated OMP profile. Sign in to ChatGPT now; Playwright will attach only after login when a model turn starts.',
           "info",
         );
       } catch (error) {
@@ -108,7 +108,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       try {
         const server = await ensureMcp();
-        const browserStatus = await browser.status();
+        const browserStatus = await browser.status(config);
         const tunnelStatus = tunnel.status(config);
         ctx.ui.notify(
           [
@@ -123,6 +123,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
                 ? "configured/stopped"
                 : "externally managed or unconfigured"),
             "browser: " + (browserStatus.open ? "open" : "closed"),
+            "automation: " + (browserStatus.attached ? "attached over CDP" : "not attached"),
             "active Web turns: " + browserStatus.activeTurns,
           ].join("\n"),
           "info",
