@@ -3,6 +3,8 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_WEB_SUBAGENT_LIMIT, normalizeWebSubagentLimit } from "./subagent-limit.js";
 
+export type ComposerInsertMode = "default" | "lexical";
+
 export interface PersistedRuntimeConfig {
   connectorName?: string;
   browserExecutable?: string;
@@ -11,6 +13,7 @@ export interface PersistedRuntimeConfig {
   tunnelApiKey?: string;
   tunnelClientBin?: string;
   subagentLimit?: number;
+  insertMode?: ComposerInsertMode;
 }
 
 export interface RuntimeConfig {
@@ -27,6 +30,7 @@ export interface RuntimeConfig {
   tunnelId?: string;
   tunnelApiKey?: string;
   subagentLimit: number;
+  insertMode: ComposerInsertMode;
 }
 
 function envBoolean(name: string, fallback: boolean): boolean {
@@ -40,6 +44,16 @@ function envNumber(name: string, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function normalizeComposerInsertMode(value: unknown): ComposerInsertMode {
+  return typeof value === "string" && value.trim().toLowerCase() === "lexical"
+    ? "lexical"
+    : "default";
+}
+
+function envInsertMode(): ComposerInsertMode {
+  return normalizeComposerInsertMode(process.env.OMP_CHATGPT_WEB_INSERT_MODE);
 }
 
 function envSubagentLimit(): number {
@@ -110,12 +124,20 @@ export function applyRuntimeConfigPatch(
   if (patch.subagentLimit !== undefined) {
     config.subagentLimit = normalizeWebSubagentLimit(patch.subagentLimit, config.subagentLimit);
   }
+  if (patch.insertMode !== undefined) {
+    config.insertMode = normalizeComposerInsertMode(patch.insertMode);
+  }
   return saved;
 }
 
 export function resetSubagentLimit(config: RuntimeConfig): void {
   savePersistentConfig({ subagentLimit: undefined });
   config.subagentLimit = envSubagentLimit();
+}
+
+export function resetComposerInsertMode(config: RuntimeConfig): void {
+  savePersistentConfig({ insertMode: undefined });
+  config.insertMode = envInsertMode();
 }
 
 export function defaultTunnelClientExecutable(): string {
@@ -223,6 +245,9 @@ export function loadRuntimeConfig(): RuntimeConfig {
     subagentLimit: normalizeWebSubagentLimit(
       persisted.subagentLimit,
       envSubagentLimit(),
+    ),
+    insertMode: normalizeComposerInsertMode(
+      persisted.insertMode ?? process.env.OMP_CHATGPT_WEB_INSERT_MODE,
     ),
   };
 }
