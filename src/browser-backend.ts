@@ -249,15 +249,67 @@ export class ChatGptBrowserBackend {
     }
 
     await toolsButton.click();
-    const connector = page.getByText(connectorName, { exact: true });
-    try {
-      await connector.first().waitFor({ state: "visible", timeout: 7_000 });
-    } catch {
+
+    let connector = await firstVisible([
+      page.getByRole("menuitem", { name: connectorName, exact: true }),
+      page.getByRole("option", { name: connectorName, exact: true }),
+      page.getByRole("button", { name: connectorName, exact: true }),
+      page.getByText(connectorName, { exact: true }),
+    ], 700);
+
+    if (!connector) {
+      const appsEntry = await firstVisible([
+        page.getByRole("menuitem", { name: /^Apps$/i }),
+        page.getByRole("menuitem", { name: /앱/ }),
+        page.getByRole("button", { name: /^Apps$/i }),
+        page.getByRole("button", { name: /앱/ }),
+        page.getByText(/^Apps$/i),
+        page.getByText(/^앱$/),
+      ], 700);
+
+      if (appsEntry) {
+        await appsEntry.click();
+        await sleep(350);
+      }
+
+      connector = await firstVisible([
+        page.getByRole("menuitem", { name: connectorName, exact: true }),
+        page.getByRole("option", { name: connectorName, exact: true }),
+        page.getByRole("button", { name: connectorName, exact: true }),
+        page.getByText(connectorName, { exact: true }),
+      ], 1_000);
+    }
+
+    if (!connector) {
+      const searchBox = await firstVisible([
+        page.getByPlaceholder(/Search apps|Search connectors|Search/i),
+        page.getByPlaceholder(/앱 검색|커넥터 검색|검색/),
+        page.locator('input[type="search"]'),
+      ], 500);
+
+      if (searchBox) {
+        await searchBox.fill(connectorName);
+        await sleep(400);
+        connector = await firstVisible([
+          page.getByRole("menuitem", { name: connectorName, exact: true }),
+          page.getByRole("option", { name: connectorName, exact: true }),
+          page.getByRole("button", { name: connectorName, exact: true }),
+          page.getByText(connectorName, { exact: true }),
+        ], 1_500);
+      }
+    }
+
+    if (!connector) {
       throw new Error(
-        'ChatGPT connector "' + connectorName + '" was not found. Create/enable that Tunnel-backed connector first.',
+        'ChatGPT app "' +
+          connectorName +
+          '" was not visible in the current chat. First verify it manually in ChatGPT Apps/Tools. ' +
+          "The tunnel must be running and the custom MCP app must already be created/enabled for this ChatGPT workspace.",
       );
     }
-    await connector.first().click();
+
+    await connector.click();
+    await sleep(250);
     await page.keyboard.press("Escape").catch(() => undefined);
 
     const activeComposer = await this.#requireComposer(page);
@@ -274,7 +326,8 @@ export class ChatGptBrowserBackend {
 
     if (!verified) {
       throw new Error(
-        'Connector "' + connectorName + '" was clicked but selected state could not be verified. Refusing to consume a Web-model turn without MCP.',
+        'ChatGPT app "' + connectorName + '" was clicked but selected state could not be verified. ' +
+        "Select the app manually once in ChatGPT and retry.",
       );
     }
     return activeComposer;
