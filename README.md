@@ -111,6 +111,25 @@ Then in OMP:
 /web-open
 ```
 
+On Windows, if OMP cannot resolve `tunnel-client` from its inherited `PATH`,
+find the installed executable from PowerShell:
+
+```powershell
+(Get-Command tunnel-client -ErrorAction Stop).Source
+```
+
+Then persist that exact path in the extension so OMP restarts do not depend on
+the shell's ambient `PATH`:
+
+```text
+/web-config tunnel-bin C:\full\path\to\tunnel-client.exe
+/web-tunnel start
+```
+
+`/web-config show` reports the currently selected tunnel-client executable.
+The extension also checks common Windows locations such as Go, Scoop, WinGet,
+Chocolatey, and `~/.local/bin` before falling back to ordinary PATH lookup.
+
 `/web-open` launches ordinary Chrome with a dedicated OMP profile and **no
 Playwright/automation/debugging flags at all**. Sign in to ChatGPT, then close
 that Chrome window completely. On the first `chatgpt-web/web` model turn, the
@@ -252,7 +271,7 @@ not a goal for this provider.
 
 | Command | Purpose |
 | --- | --- |
-| `/web-config ...` | Persist tunnel/API/connector/browser settings outside the plugin install directory |
+| `/web-config ...` | Persist tunnel/API/tunnel-client/connector/browser settings outside the plugin install directory |
 | `/web-open` | Open ordinary Chrome for manual sign-in; automation attaches later over CDP |
 | `/web-use` | Switch this OMP session to `chatgpt-web/web` |
 | `/web-status` | Show provider/browser/MCP/tunnel status |
