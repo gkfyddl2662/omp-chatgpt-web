@@ -45,6 +45,8 @@ interface BrowserPreparationTiming {
   mentionMs: number;
   insertMs: number;
   insertMode: "paste" | "execCommand" | "cdp";
+  insertEditMs: number;
+  insertVerifyMs: number;
   submitMs: number;
 }
 
@@ -421,7 +423,7 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     try {
-      const insertMode = await this.#insertComposerText(
+      const insertion = await this.#insertComposerText(
         page,
         composer,
         " " + prompt,
@@ -435,7 +437,9 @@ export class ChatGptBrowserBackend {
         sessionMs: sessionReadyAt - preparationStartedAt,
         mentionMs: mentionReadyAt - sessionReadyAt,
         insertMs: insertedAt - mentionReadyAt,
-        insertMode,
+        insertMode: insertion.mode,
+        insertEditMs: insertion.editMs,
+        insertVerifyMs: insertion.verifyMs,
         submitMs: submittedAt - insertedAt,
       };
       session.seeded = true;
@@ -716,10 +720,30 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #composerPlainText(composer: Locator): Promise<string> {
-    const value = await composer.inputValue().catch(() => undefined);
-    if (typeof value === "string") return value;
-    return await composer.innerText().catch(() => "");
+  async #composerPromptText(composer: Locator): Promise<string> {
+    return await composer.evaluate(element => {
+      if (
+        element instanceof HTMLTextAreaElement ||
+        element instanceof HTMLInputElement
+      ) {
+        return element.value;
+      }
+
+      // Match codex-chatgpt-web's retained-composer readback strategy:
+      // inspect a detached clone via textContent so verification does not force
+      // layout across the increasingly large ChatGPT conversation DOM.
+      const clone = element.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll(
+        '[data-id^="plugin:"][data-keyword], ' +
+          '[data-inline-selection-pill-cursor-target], ' +
+          '[data-mention], [data-app-id], [data-testid*="mention"]',
+      ).forEach(part => part.remove());
+
+      return [...clone.childNodes]
+        .map(child => child.textContent ?? "")
+        .join("\n")
+        .trimStart();
+    });
   }
 
   #verifyComposerInsertion(
@@ -735,13 +759,14 @@ export class ChatGptBrowserBackend {
         .trim();
 
     const normalizedPrompt = normalize(text);
+    const normalizedBefore = normalize(before);
     const normalizedActual = normalize(actual);
     const fingerprintSize = Math.min(2_048, normalizedPrompt.length);
     const tail = normalizedPrompt.slice(-fingerprintSize);
 
-    const growth = actual.length - before.length;
-    const minGrowth = Math.floor(text.length * 0.9);
-    const maxGrowth = Math.ceil(text.length * 1.2) + 8_192;
+    const growth = normalizedActual.length - normalizedBefore.length;
+    const minGrowth = Math.floor(normalizedPrompt.length * 0.9);
+    const maxGrowth = Math.ceil(normalizedPrompt.length * 1.2) + 8_192;
 
     return (
       growth >= minGrowth &&
@@ -754,9 +779,15 @@ export class ChatGptBrowserBackend {
     page: Page,
     composer: Locator,
     text: string,
-  ): Promise<"paste" | "execCommand" | "cdp"> {
+  ): Promise<{
+    mode: "paste" | "execCommand" | "cdp";
+    editMs: number;
+    verifyMs: number;
+  }> {
     await composer.focus();
-    const before = await this.#composerPlainText(composer);
+    const before = await this.#composerPromptText(composer);
+
+    const editStartedAt = Date.now();
 
     // Preferred fast path for large prompts: let ChatGPT/Lexical process one
     // paste transaction. This does not touch the user's OS clipboard and does
@@ -781,35 +812,55 @@ export class ChatGptBrowserBackend {
     if (pasteDispatched) {
       const pasteDeadline = Date.now() + 250;
       while (Date.now() < pasteDeadline) {
-        const actual = await this.#composerPlainText(composer);
-        if (actual.length !== before.length) {
+        const actual = await this.#composerPromptText(composer);
+        if (actual !== before) {
+          const verifiedAt = Date.now();
           if (!this.#verifyComposerInsertion(before, actual, text)) {
             throw new Error(
               "ChatGPT composer prompt verification failed after paste " +
                 "(prompt " + text.length +
-                " chars, composer growth " + (actual.length - before.length) +
-                " chars, total " + actual.length + ").",
+                " chars, observed " + actual.length + " chars).",
             );
           }
-          return "paste";
+          return {
+            mode: "paste",
+            editMs: verifiedAt - editStartedAt,
+            verifyMs: 0,
+          };
         }
         await sleep(15);
       }
     }
 
-    // Compatibility path: one browser editing operation, without a manually
-    // dispatched input event. If it reports no mutation, native CDP insertion
-    // is still safe because nothing has been added yet.
+    // Compatibility path: one browser editing operation. This is the same
+    // plain-text editor primitive used by codex-chatgpt-web.
     const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
-      el.focus();
+      if (document.activeElement !== el) el.focus();
+      if (document.activeElement !== el) return false;
 
       const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
+      if (!selection) return false;
+      const alreadyPlaced =
+        selection.isCollapsed &&
+        selection.anchorNode !== null &&
+        el.contains(selection.anchorNode);
+
+      if (!alreadyPlaced) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      if (
+        !selection.isCollapsed ||
+        !selection.anchorNode ||
+        !el.contains(selection.anchorNode)
+      ) {
+        return false;
+      }
 
       return document.execCommand("insertText", false, String(value));
     }, text).catch(() => false);
@@ -821,16 +872,23 @@ export class ChatGptBrowserBackend {
       mode = "cdp";
     }
 
-    const actual = await this.#composerPlainText(composer);
+    const editedAt = Date.now();
+    const actual = await this.#composerPromptText(composer);
+    const verifiedAt = Date.now();
+
     if (!this.#verifyComposerInsertion(before, actual, text)) {
       throw new Error(
         "ChatGPT composer prompt verification failed " +
           "(prompt " + text.length +
-          " chars, composer growth " + (actual.length - before.length) +
-          " chars, total " + actual.length + ").",
+          " chars, observed " + actual.length + " chars).",
       );
     }
-    return mode;
+
+    return {
+      mode,
+      editMs: editedAt - editStartedAt,
+      verifyMs: verifiedAt - editedAt,
+    };
   }
 
   async #mentionSuggestionVisible(
