@@ -9,6 +9,7 @@ export interface RuntimeConfig {
   chatUrl: string;
   browserProfileDir: string;
   browserExecutable?: string;
+  browserCdpPort: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
   turnTimeoutMs: number;
@@ -79,6 +80,7 @@ export function loadRuntimeConfig(): RuntimeConfig {
     browserProfileDir:
       process.env.OMP_CHATGPT_WEB_PROFILE?.trim() || join(homedir(), ".omp", "chatgpt-web", "chrome"),
     browserExecutable: defaultBrowserExecutable(),
+    browserCdpPort: Math.floor(envNumber("OMP_CHATGPT_WEB_CDP_PORT", 9222)),
     headed: envBoolean("OMP_CHATGPT_WEB_HEADED", true),
     autoApproveToolCalls: envBoolean("OMP_CHATGPT_WEB_AUTO_APPROVE", false),
     turnTimeoutMs: Math.floor(envNumber("OMP_CHATGPT_WEB_TURN_TIMEOUT_MS", 15 * 60_000)),
