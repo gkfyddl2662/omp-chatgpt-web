@@ -44,7 +44,7 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "clipboard" | "execCommand" | "cdp";
+  insertMode: "execCommand" | "cdp";
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -775,231 +775,22 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #tryTrustedClipboardPaste(
-    page: Page,
-    composer: Locator,
-    text: string,
-    before: string,
-  ): Promise<{ editMs: number; verifyMs: number } | undefined> {
-    const origin = new URL(page.url()).origin;
-    if (origin !== "https://chatgpt.com") return undefined;
-
-    try {
-      await page.context().grantPermissions(
-        ["clipboard-read", "clipboard-write"],
-        { origin },
-      );
-    } catch {
-      return undefined;
-    }
-
-    type ClipboardPreparation = {
-      prepared: boolean;
-      reason?: string;
-    };
-
-    const prepared = await page.evaluate(async value => {
-      type StoredPart = {
-        type: string;
-        data: ArrayBuffer;
-      };
-      type StoredItem = StoredPart[];
-
-      const scope = globalThis as typeof globalThis & {
-        __OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__?: StoredItem[];
-      };
-
-      try {
-        const original = await navigator.clipboard.read();
-        const stored: StoredItem[] = [];
-        let totalBytes = 0;
-
-        for (const item of original) {
-          const storedItem: StoredItem = [];
-          for (const type of item.types) {
-            if (
-              typeof ClipboardItem === "undefined" ||
-              !ClipboardItem.supports(type)
-            ) {
-              return {
-                prepared: false,
-                reason: "unsupported clipboard format " + type,
-              };
-            }
-            const blob = await item.getType(type);
-            totalBytes += blob.size;
-            if (totalBytes > 8 * 1024 * 1024) {
-              return {
-                prepared: false,
-                reason: "clipboard backup exceeds 8 MiB",
-              };
-            }
-            storedItem.push({
-              type,
-              data: await blob.arrayBuffer(),
-            });
-          }
-          stored.push(storedItem);
-        }
-
-        // Prove that the original clipboard representation is writable before
-        // replacing it. If not, leave the user's clipboard untouched and let
-        // the caller use the compatibility insertion path.
-        if (stored.length > 0) {
-          const roundTrip = stored.map(parts => new ClipboardItem(
-            Object.fromEntries(
-              parts.map(part => [
-                part.type,
-                new Blob([part.data], { type: part.type }),
-              ]),
-            ),
-          ));
-          await navigator.clipboard.write(roundTrip);
-        }
-
-        scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__ = stored;
-        await navigator.clipboard.writeText(String(value));
-        return { prepared: true };
-      } catch (error) {
-        delete scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
-        return {
-          prepared: false,
-          reason: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }, text) as ClipboardPreparation;
-
-    if (!prepared.prepared) return undefined;
-
-    let pasteSucceeded = false;
-    const editStartedAt = Date.now();
-
-    try {
-      await composer.focus();
-
-      // Ensure the native paste lands after the selected @OMP Local pill.
-      await composer.evaluate(element => {
-        if (!(element instanceof HTMLElement)) return;
-        const selection = window.getSelection();
-        if (!selection) return;
-        const range = document.createRange();
-        range.selectNodeContents(element);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      });
-
-      await composer.press(
-        process.platform === "darwin" ? "Meta+V" : "Control+V",
-      );
-
-      const editedAt = Date.now();
-      const deadline = Date.now() + 2_000;
-      let actual = before;
-
-      while (Date.now() < deadline) {
-        actual = await this.#composerPromptText(composer);
-        if (actual !== before) break;
-        await sleep(15);
-      }
-
-      const verifiedAt = Date.now();
-      if (actual === before) return undefined;
-
-      pasteSucceeded = this.#verifyComposerInsertion(
-        before,
-        actual,
-        text,
-      );
-
-      if (!pasteSucceeded) {
-        throw new Error(
-          "ChatGPT changed the composer during trusted clipboard paste " +
-            "(prompt " + text.length +
-            " chars, observed " + actual.length + " chars).",
-        );
-      }
-
-      return {
-        editMs: editedAt - editStartedAt,
-        verifyMs: verifiedAt - editedAt,
-      };
-    } finally {
-      // Restore the exact clipboard representation captured above, but only
-      // if the clipboard still contains our temporary prompt. If the user
-      // copied something else during this tiny window, never overwrite it.
-      await page.evaluate(async value => {
-        type StoredPart = {
-          type: string;
-          data: ArrayBuffer;
-        };
-        type StoredItem = StoredPart[];
-
-        const scope = globalThis as typeof globalThis & {
-          __OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__?: StoredItem[];
-        };
-        const backup = scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
-        delete scope.__OMP_CHATGPT_WEB_CLIPBOARD_BACKUP__;
-        if (!backup) return;
-
-        try {
-          const current = await navigator.clipboard.readText();
-          if (current !== String(value)) return;
-
-          if (backup.length === 0) {
-            await navigator.clipboard.writeText("");
-            return;
-          }
-
-          const restored = backup.map(parts => new ClipboardItem(
-            Object.fromEntries(
-              parts.map(part => [
-                part.type,
-                new Blob([part.data], { type: part.type }),
-              ]),
-            ),
-          ));
-          await navigator.clipboard.write(restored);
-        } catch {
-          // Clipboard restoration is best-effort. The fast path is only
-          // entered after a successful round-trip proof above.
-        }
-      }, text).catch(() => undefined);
-    }
-  }
-
   async #insertComposerText(
     page: Page,
     composer: Locator,
     text: string,
   ): Promise<{
-    mode: "clipboard" | "execCommand" | "cdp";
+    mode: "execCommand" | "cdp";
     editMs: number;
     verifyMs: number;
   }> {
     await composer.focus();
     const before = await this.#composerPromptText(composer);
-
-    // Fast path: reproduce the user's native Ctrl+V workflow. Unlike a
-    // synthetic ClipboardEvent, this is a trusted browser paste and follows
-    // ChatGPT/Lexical's optimized paste handling.
-    const clipboardPaste = await this.#tryTrustedClipboardPaste(
-      page,
-      composer,
-      text,
-      before,
-    );
-    if (clipboardPaste) {
-      return {
-        mode: "clipboard",
-        ...clipboardPaste,
-      };
-    }
-
     const editStartedAt = Date.now();
 
-    // Compatibility path used when the system clipboard cannot be safely
-    // backed up/restored.
+    // Keep the prompt inline. Clipboard-based automation is intentionally not
+    // used here: ChatGPT can convert automated large pastes into a "Pasted
+    // text" attachment even when the same user-driven paste stays inline.
     const inserted = await composer.evaluate((element, value) => {
       const el = element as HTMLElement;
       if (document.activeElement !== el) el.focus();
