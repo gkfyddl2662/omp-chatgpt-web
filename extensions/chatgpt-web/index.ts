@@ -5,6 +5,7 @@ import {
   applyRuntimeConfigPatch,
   loadRuntimeConfig,
   persistentConfigPath,
+  resetComposerInsertMode,
   resetSubagentLimit,
   tunnelConfigured,
 } from "../../src/config.js";
@@ -219,6 +220,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
               "subagents: " + (config.subagentLimit < 0 ? "unlimited" : config.subagentLimit),
+              "insert: " + config.insertMode,
             ].join("\n"),
             "info",
           );
@@ -265,6 +267,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "pending compactions: " + browserStatus.pendingCompactions,
               "shared Web sessions: " + sharedBindingCount,
               "subagents: " + formatSubagentLimit(subagentStatus),
+              "insert strategy: " + config.insertMode,
               ...(browserStatus.lastPreparation
                 ? [
                     "last prompt chars: " + browserStatus.lastPreparation.promptChars,
@@ -388,6 +391,8 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { browserExecutable: "" });
           } else if (key === "subagents") {
             resetSubagentLimit(config);
+          } else if (key === "insert") {
+            resetComposerInsertMode(config);
           } else {
             applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
           }
@@ -427,6 +432,16 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           ctx.ui.notify("Saved browser executable path.", "info");
           return;
         }
+        if (key === "insert") {
+          const mode = value.trim().toLowerCase();
+          if (mode !== "default" && mode !== "lexical") {
+            ctx.ui.notify("Insert mode must be 'default' or 'lexical'.", "warning");
+            return;
+          }
+          applyRuntimeConfigPatch(config, { insertMode: mode });
+          ctx.ui.notify("Saved ChatGPT composer insert mode: " + mode, "info");
+          return;
+        }
         if (key === "subagents") {
           const limit = value.toLowerCase() === "off" ? -1 : Number(value);
           if (!Number.isSafeInteger(limit) || limit < -1) {
@@ -455,7 +470,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("web-config", {
-    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | clear <key>",
+    description: "Persist ChatGPT Web settings: show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | insert <default|lexical> | clear <key>",
     handler: async (args, ctx) => {
       try {
         const trimmed = args.trim();
@@ -479,6 +494,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
               "tunnel-client: " + config.tunnelClientBin,
               "cdp: " + config.browserCdpPort,
               "subagents: " + (config.subagentLimit < 0 ? "unlimited" : config.subagentLimit),
+              "insert: " + config.insertMode,
             ].join("\n"),
             "info",
           );
@@ -503,8 +519,10 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             applyRuntimeConfigPatch(config, { tunnelClientBin: "" });
           } else if (key === "subagents") {
             resetSubagentLimit(config);
+          } else if (key === "insert") {
+            resetComposerInsertMode(config);
           } else {
-            ctx.ui.notify("Usage: /web-config clear api|tunnel|tunnel-bin|connector|browser|subagents", "warning");
+            ctx.ui.notify("Usage: /web-config clear api|tunnel|tunnel-bin|connector|browser|subagents|insert", "warning");
             return;
           }
           if (key === "api" || key === "tunnel") {
@@ -516,7 +534,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
 
         if (!value) {
           ctx.ui.notify(
-            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | clear <key>",
+            "Usage: /web-config show | tunnel <id> | api <key> | tunnel-bin <path> | connector <name> | browser <path> | cdp <port> | subagents <count|off> | insert <default|lexical> | clear <key>",
             "warning",
           );
           return;
@@ -555,6 +573,17 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           return;
         }
 
+        if (action === "insert") {
+          const mode = value.trim().toLowerCase();
+          if (mode !== "default" && mode !== "lexical") {
+            ctx.ui.notify("Insert mode must be 'default' or 'lexical'.", "warning");
+            return;
+          }
+          applyRuntimeConfigPatch(config, { insertMode: mode });
+          ctx.ui.notify("Saved ChatGPT composer insert mode: " + mode, "info");
+          return;
+        }
+
         if (action === "subagents") {
           const limit = value.toLowerCase() === "off" ? -1 : Number(value);
           if (!Number.isSafeInteger(limit) || limit < -1) {
@@ -578,7 +607,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         }
 
         ctx.ui.notify(
-          "Unknown web-config key. Use: show | tunnel | api | tunnel-bin | connector | browser | cdp | subagents | clear",
+          "Unknown web-config key. Use: show | tunnel | api | tunnel-bin | connector | browser | cdp | subagents | insert | clear",
           "warning",
         );
       } catch (error) {
@@ -646,6 +675,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             "active Web turns: " + browserStatus.activeTurns,
             "pending compactions: " + browserStatus.pendingCompactions,
             "shared Web sessions: " + sharedBindingCount,
+            "insert strategy: " + config.insertMode,
             ...(browserStatus.lastPreparation
               ? [
                   "last prompt chars: " + browserStatus.lastPreparation.promptChars,

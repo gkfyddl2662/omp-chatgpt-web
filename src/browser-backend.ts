@@ -43,7 +43,7 @@ interface BrowserPreparationTiming {
   sessionMs: number;
   mentionMs: number;
   insertMs: number;
-  insertMode: "execCommand" | "cdp";
+  insertMode: "lexical" | "execCommand" | "cdp";
   insertEditMs: number;
   insertVerifyMs: number;
   submitMs: number;
@@ -453,7 +453,7 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     let insertion: {
-      mode: "execCommand" | "cdp";
+      mode: "lexical" | "execCommand" | "cdp";
       editMs: number;
       verifyMs: number;
     };
@@ -464,6 +464,7 @@ export class ChatGptBrowserBackend {
         page,
         composer,
         " " + prompt,
+        config.insertMode,
       );
       insertedAt = Date.now();
     } catch (error) {
@@ -813,8 +814,9 @@ export class ChatGptBrowserBackend {
     page: Page,
     composer: Locator,
     text: string,
+    strategy: RuntimeConfig["insertMode"],
   ): Promise<{
-    mode: "execCommand" | "cdp";
+    mode: "lexical" | "execCommand" | "cdp";
     editMs: number;
     verifyMs: number;
   }> {
@@ -822,41 +824,113 @@ export class ChatGptBrowserBackend {
     const before = await this.#composerPromptText(composer);
     const editStartedAt = Date.now();
 
-    // Backend-only inline insertion. No OS clipboard, no foreground-window
-    // activation, and no synthetic paste events that ChatGPT may promote to
-    // a "Pasted text" attachment.
-    const inserted = await composer.evaluate((element, value) => {
-      const el = element as HTMLElement;
-      if (document.activeElement !== el) el.focus();
-      if (document.activeElement !== el) return false;
+    let inserted = false;
+    let mode: "lexical" | "execCommand" | "cdp" = "execCommand";
 
-      const selection = window.getSelection();
-      if (!selection) return false;
-      const alreadyPlaced =
-        selection.isCollapsed &&
-        selection.anchorNode !== null &&
-        el.contains(selection.anchorNode);
+    if (strategy === "lexical") {
+      // Experimental fast path: ChatGPT's contenteditable composer is backed
+      // by Lexical. Lexical stores its editor instance on the root DOM node,
+      // and its registered commands carry stable type labels. Dispatching
+      // CONTROLLED_TEXT_INSERTION_COMMAND with the whole provider prompt lets
+      // Lexical perform one editor update instead of routing a huge string
+      // through Chromium's execCommand/Input.insertText editing path.
+      //
+      // This intentionally uses only runtime-discovered private state. If the
+      // current ChatGPT build stops exposing the editor or command, the
+      // attempt returns false before mutating content and falls back below.
+      inserted = await composer.evaluate((element, value) => {
+        type LexicalCommandLike = { type?: string };
+        type LexicalEditorLike = {
+          _commands?: Map<LexicalCommandLike, unknown>;
+          dispatchCommand?: (command: LexicalCommandLike, payload: string) => boolean;
+          focus?: (
+            callback?: () => void,
+            options?: { defaultSelection?: "rootStart" | "rootEnd" },
+          ) => void;
+        };
 
-      if (!alreadyPlaced) {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
+        const el = element as HTMLElement;
+        let current: HTMLElement | null = el;
+        let editor: LexicalEditorLike | undefined;
 
-      if (
-        !selection.isCollapsed ||
-        !selection.anchorNode ||
-        !el.contains(selection.anchorNode)
-      ) {
-        return false;
-      }
+        while (current) {
+          const candidate = (
+            current as HTMLElement & { __lexicalEditor?: LexicalEditorLike }
+          ).__lexicalEditor;
+          if (
+            candidate &&
+            typeof candidate.dispatchCommand === "function" &&
+            candidate._commands
+          ) {
+            editor = candidate;
+            break;
+          }
+          current = current.parentElement;
+        }
 
-      return document.execCommand("insertText", false, String(value));
-    }, text).catch(() => false);
+        if (!editor?.dispatchCommand || !editor._commands) return false;
 
-    let mode: "execCommand" | "cdp" = "execCommand";
+        let insertCommand: LexicalCommandLike | undefined;
+        for (const command of editor._commands.keys()) {
+          if (command?.type === "CONTROLLED_TEXT_INSERTION_COMMAND") {
+            insertCommand = command;
+            break;
+          }
+        }
+        if (!insertCommand) return false;
+
+        try {
+          // Lexical focus creates/restores its internal RangeSelection
+          // synchronously. The connector selection has already positioned the
+          // caret after its pill; rootEnd is only the fallback when Lexical has
+          // no retained selection.
+          editor.focus?.(undefined, { defaultSelection: "rootEnd" });
+          return editor.dispatchCommand(insertCommand, String(value)) === true;
+        } catch {
+          return false;
+        }
+      }, text).catch(() => false);
+
+      if (inserted) mode = "lexical";
+    }
+
+    if (!inserted) {
+      // Backend-only inline insertion. No OS clipboard, no foreground-window
+      // activation, and no synthetic paste events that ChatGPT may promote to
+      // a "Pasted text" attachment.
+      inserted = await composer.evaluate((element, value) => {
+        const el = element as HTMLElement;
+        if (document.activeElement !== el) el.focus();
+        if (document.activeElement !== el) return false;
+
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const alreadyPlaced =
+          selection.isCollapsed &&
+          selection.anchorNode !== null &&
+          el.contains(selection.anchorNode);
+
+        if (!alreadyPlaced) {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+
+        if (
+          !selection.isCollapsed ||
+          !selection.anchorNode ||
+          !el.contains(selection.anchorNode)
+        ) {
+          return false;
+        }
+
+        return document.execCommand("insertText", false, String(value));
+      }, text).catch(() => false);
+      mode = "execCommand";
+    }
+
     if (!inserted) {
       await composer.focus();
       await page.keyboard.insertText(text);
