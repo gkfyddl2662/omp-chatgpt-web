@@ -460,7 +460,7 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     let insertion: {
-      mode: "execCommand" | "cdp";
+      mode: "execCommand" | "hidden-exec" | "cdp";
       editMs: number;
       verifyMs: number;
     };
