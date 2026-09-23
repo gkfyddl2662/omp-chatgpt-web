@@ -232,7 +232,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             "MCP: " + server.url,
             "connector: " + config.connectorName,
             "tunnel: " + (tunnelStatus.running
-              ? "running"
+              ? tunnelStatus.ready ? "ready" : "running/not-ready"
               : tunnelStatus.configured
                 ? "configured/stopped"
                 : "externally managed or unconfigured"),
@@ -257,7 +257,9 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         if (action === "start") {
           const status = await tunnel.start(config, server.url);
           ctx.ui.notify(
-            "Secure MCP Tunnel running" + (status.pid ? " pid=" + status.pid : ""),
+            "Secure MCP Tunnel ready" +
+              (status.pid ? " pid=" + status.pid : "") +
+              (status.healthUrl ? "\nhealth: " + status.healthUrl : ""),
             "info",
           );
           return;
@@ -271,9 +273,10 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
           ctx.ui.notify("Usage: /web-tunnel start|stop|status", "warning");
           return;
         }
+        const diagnostics = await tunnel.diagnostics(config);
         ctx.ui.notify(
-          JSON.stringify({ ...tunnel.status(config), mcp: server.url }, null, 2),
-          "info",
+          JSON.stringify({ ...diagnostics, mcp: server.url }, null, 2),
+          diagnostics.ready ? "info" : "warning",
         );
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
