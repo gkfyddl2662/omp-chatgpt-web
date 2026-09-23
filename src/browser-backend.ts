@@ -42,6 +42,7 @@ interface BrowserSession {
 interface BrowserPreparationTiming {
   promptChars: number;
   sessionMs: number;
+  rehydrateEligible: boolean;
   rehydrateMs: number;
   mentionMs: number;
   insertMs: number;
@@ -455,7 +456,9 @@ export class ChatGptBrowserBackend {
     // If this is a real /c/<id> conversation URL, reload that SAME conversation
     // in the background before the next turn. Generic temporary-chat URLs are
     // deliberately left untouched to avoid losing the retained thread.
-    if (session.seeded) {
+    const rehydrateEligible =
+      session.seeded && this.#canRehydrateRetainedPage(session.page);
+    if (rehydrateEligible) {
       await this.#rehydrateRetainedPage(session);
     }
     const rehydratedAt = Date.now();
@@ -516,6 +519,7 @@ export class ChatGptBrowserBackend {
       this.#lastPreparation = {
         promptChars: prompt.length,
         sessionMs: sessionReadyAt - preparationStartedAt,
+        rehydrateEligible,
         rehydrateMs: rehydratedAt - sessionReadyAt,
         mentionMs: mentionReadyAt - rehydratedAt,
         insertMs: insertedAt - mentionReadyAt,
@@ -930,51 +934,6 @@ export class ChatGptBrowserBackend {
       editMs: editedAt - editStartedAt,
       verifyMs: verifiedAt - editedAt,
     };
-  }
-
-  async #mentionSuggestionVisible(
-    page: Page,
-    composer: Locator,
-    connectorName: string,
-  ): Promise<boolean> {
-    const composerHandle = await composer.elementHandle().catch(() => null);
-    return await page.evaluate(
-      ({ name, composerElement }) => {
-        const visible = (element: Element): boolean => {
-          const style = window.getComputedStyle(element);
-          if (
-            style.display === "none" ||
-            style.visibility === "hidden" ||
-            Number(style.opacity || "1") === 0
-          ) {
-            return false;
-          }
-          const rect = element.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0;
-        };
-
-        const elements = Array.from(document.querySelectorAll("body *"));
-        return elements.some(element => {
-          if (!visible(element)) return false;
-          if ((element.textContent || "").trim() !== name) return false;
-
-          // Ignore the already-attached inline plugin pill/detail link.
-          const pluginLink = element.closest('a[href*="/plugins/"]');
-          if (pluginLink) return false;
-
-          // Ignore text rendered inside the composer itself.
-          if (
-            composerElement instanceof Element &&
-            composerElement.contains(element)
-          ) {
-            return false;
-          }
-
-          return true;
-        });
-      },
-      { name: connectorName, composerElement: composerHandle },
-    ).catch(() => false);
   }
 
   async #selectedConnectorIsExact(
