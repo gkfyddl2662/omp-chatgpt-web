@@ -43,6 +43,7 @@ export class ChatGptBrowserBackend {
         "--user-data-dir=" + config.browserProfileDir,
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-background-mode",
         "https://chatgpt.com/",
       ],
       {
@@ -73,6 +74,7 @@ export class ChatGptBrowserBackend {
         "--user-data-dir=" + config.browserProfileDir,
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-background-mode",
         "about:blank",
       ],
       {
@@ -213,13 +215,20 @@ export class ChatGptBrowserBackend {
     }
   }
 
-  async status(config?: RuntimeConfig): Promise<{ open: boolean; attached: boolean; activeTurns: number; urls: string[] }> {
+  async status(config?: RuntimeConfig): Promise<{
+    open: boolean;
+    attached: boolean;
+    tabs: number;
+    activeTurns: number;
+    urls: string[];
+  }> {
     const open = config
       ? await this.#cdpReady("http://127.0.0.1:" + config.browserCdpPort)
       : Boolean(this.#context);
     return {
       open,
       attached: Boolean(this.#browser?.isConnected() && this.#context),
+      tabs: this.#context?.pages().filter(page => !page.isClosed()).length ?? 0,
       activeTurns: this.#turns.size,
       urls: [...this.#turns.values()].map(turn => turn.page.url()),
     };
