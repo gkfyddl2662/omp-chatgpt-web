@@ -43,7 +43,13 @@ test("/web set and unset preserve values with spaces", () => {
     key: "browser",
     value: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   });
+  assert.deepEqual(parseWebCommand("set insert lexical"), {
+    kind: "set",
+    key: "insert",
+    value: "lexical",
+  });
   assert.deepEqual(parseWebCommand("unset api"), { kind: "unset", key: "api" });
+  assert.deepEqual(parseWebCommand("unset insert"), { kind: "unset", key: "insert" });
 });
 
 test("invalid subcommands fail with actionable usage", () => {
@@ -76,6 +82,10 @@ test("argument completion covers root, tunnel, set, and unset commands", () => {
   assert.deepEqual(
     getWebArgumentCompletions("set con")?.map(item => item.label),
     ["connector"],
+  );
+  assert.deepEqual(
+    getWebArgumentCompletions("set ins")?.map(item => item.label),
+    ["insert"],
   );
   assert.deepEqual(
     getWebArgumentCompletions("unset tun")?.map(item => item.label),
