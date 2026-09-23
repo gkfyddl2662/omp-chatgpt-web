@@ -1,3 +1,4 @@
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { ChatGptBrowserBackend } from "../../src/browser-backend.js";
 import {
@@ -17,7 +18,7 @@ const API = "chatgpt-web";
 const LOCAL_SENTINEL_KEY = "omp-chatgpt-web-local-transport";
 
 const sharedConfig = loadRuntimeConfig();
-const sharedBroker = new TurnBroker();
+const sharedBroker = new TurnBroker({ schemaForTool: toolWireSchema });
 const sharedBrowser = new ChatGptBrowserBackend();
 const sharedTunnel = new TunnelSupervisor();
 const sharedConversationOwners = new Map<string, number>();
