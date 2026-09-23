@@ -4,7 +4,8 @@ import type { TurnBroker } from "./turn-broker.js";
 
 const SERVER_NAME = "omp-chatgpt-web";
 const SERVER_VERSION = "0.2.0";
-const PROTOCOL_VERSION = "2025-11-25";
+const LEGACY_PROTOCOL_VERSION = "2025-11-25";
+const MODERN_PROTOCOL_VERSION = "2026-07-28";
 
 interface JsonRpcRequest {
   jsonrpc?: string;
@@ -60,12 +61,34 @@ export async function createMcpServer(options: {
 
     if (method === "notifications/initialized") return undefined;
     if (method === "ping") return rpcResult(request.id, {});
+
+    if (method === "server/discover") {
+      return rpcResult(request.id, {
+        resultType: "complete",
+        supportedVersions: [MODERN_PROTOCOL_VERSION],
+        capabilities: { tools: {} },
+        _meta: {
+          "io.modelcontextprotocol/serverInfo": {
+            name: SERVER_NAME,
+            version: SERVER_VERSION,
+          },
+        },
+        instructions:
+          "This MCP server bridges ChatGPT to the live Oh My Pi tool surface. " +
+          "Use omp_tool_inventory to inspect the exact current OMP tools, " +
+          "omp_tool_call to request one native OMP tool, and omp_turn_complete " +
+          "to finish the current OMP model turn.",
+        ttlMs: 60_000,
+        cacheScope: "private",
+      });
+    }
+
     if (method === "initialize") {
       return rpcResult(request.id, {
         protocolVersion:
           typeof request.params?.protocolVersion === "string"
             ? request.params.protocolVersion
-            : PROTOCOL_VERSION,
+            : LEGACY_PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
       });
