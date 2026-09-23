@@ -39,12 +39,21 @@ interface BrowserSession {
   lastUsedAt: number;
 }
 
+interface BrowserPreparationTiming {
+  promptChars: number;
+  sessionMs: number;
+  mentionMs: number;
+  insertMs: number;
+  submitMs: number;
+}
+
 export class ChatGptBrowserBackend {
   #browser?: Browser;
   #context?: BrowserContext;
   readonly #turns = new Map<string, BrowserTurn>();
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #reservedPages = new Set<Page>();
+  #lastPreparation?: BrowserPreparationTiming;
 
   async openLogin(config: RuntimeConfig): Promise<void> {
     if (!config.browserExecutable) {
@@ -314,6 +323,7 @@ export class ChatGptBrowserBackend {
     tabs: number;
     retainedSessions: number;
     activeTurns: number;
+    lastPreparation?: BrowserPreparationTiming;
     urls: string[];
   }> {
     this.#pruneClosedSessions();
@@ -326,6 +336,7 @@ export class ChatGptBrowserBackend {
       tabs: this.#context?.pages().filter(page => !page.isClosed()).length ?? 0,
       retainedSessions: this.#sessions.size,
       activeTurns: this.#turns.size,
+      ...(this.#lastPreparation ? { lastPreparation: { ...this.#lastPreparation } } : {}),
       urls: [...this.#sessions.values()]
         .filter(session => !session.page.isClosed())
         .map(session => session.page.url()),
@@ -343,10 +354,12 @@ export class ChatGptBrowserBackend {
       );
     }
 
+    const preparationStartedAt = Date.now();
     const session = await this.#session(sessionKey, config);
     if (session.resetAfterTurn) {
       await this.#resetSessionPage(sessionKey, config);
     }
+    const sessionReadyAt = Date.now();
 
     const page = session.page;
     let composer: Locator;
@@ -357,6 +370,7 @@ export class ChatGptBrowserBackend {
       await this.invalidateSession(sessionKey);
       throw error;
     }
+    const mentionReadyAt = Date.now();
 
     const turn: BrowserTurn = { page };
     this.#turns.set(sessionKey, turn);
@@ -374,9 +388,18 @@ export class ChatGptBrowserBackend {
       .catch(() => 0);
 
     try {
-      await this.#insertComposerText(composer, " " + prompt);
+      await this.#insertComposerText(page, composer, " " + prompt);
+      const insertedAt = Date.now();
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page, baselineUsers);
+      const submittedAt = Date.now();
+      this.#lastPreparation = {
+        promptChars: prompt.length,
+        sessionMs: sessionReadyAt - preparationStartedAt,
+        mentionMs: mentionReadyAt - sessionReadyAt,
+        insertMs: insertedAt - mentionReadyAt,
+        submitMs: submittedAt - insertedAt,
+      };
       session.seeded = true;
       session.lastUsedAt = Date.now();
     } catch (error) {
@@ -611,36 +634,47 @@ export class ChatGptBrowserBackend {
   }
 
   async #insertComposerText(
+    page: Page,
     composer: Locator,
     text: string,
   ): Promise<void> {
-    await composer.evaluate((element, value) => {
-      const el = element as HTMLElement;
-      el.focus();
+    await composer.focus();
 
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      range.collapse(false);
+    try {
+      // Playwright maps this to CDP Input.insertText: one native text insertion
+      // regardless of prompt length. It preserves the already-attached app
+      // mention and avoids the DOM mutation/reconciliation cost of execCommand.
+      await page.keyboard.insertText(text);
+      return;
+    } catch {
+      // Keep a content-preserving fallback. The prompt string is unchanged.
+      await composer.evaluate((element, value) => {
+        const el = element as HTMLElement;
+        el.focus();
 
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-
-      const inserted = document.execCommand("insertText", false, String(value));
-      if (!inserted) {
-        const node = document.createTextNode(String(value));
-        range.insertNode(node);
-        range.setStartAfter(node);
-        range.collapse(true);
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
         selection?.removeAllRanges();
         selection?.addRange(range);
-        el.dispatchEvent(new InputEvent("input", {
-          bubbles: true,
-          inputType: "insertText",
-          data: String(value),
-        }));
-      }
-    }, text);
+
+        const inserted = document.execCommand("insertText", false, String(value));
+        if (!inserted) {
+          const node = document.createTextNode(String(value));
+          range.insertNode(node);
+          range.setStartAfter(node);
+          range.collapse(true);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          el.dispatchEvent(new InputEvent("input", {
+            bubbles: true,
+            inputType: "insertText",
+            data: String(value),
+          }));
+        }
+      }, text);
+    }
   }
 
   async #mentionSuggestionVisible(
