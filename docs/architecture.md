@@ -1,235 +1,319 @@
 # Architecture
 
-## Design goal
+## Purpose
 
-`omp-chatgpt-web` makes ChatGPT Web a **provider transport** for OMP. It does
-not add a child worker behind another model.
+`omp-chatgpt-web` makes normal ChatGPT Web the model transport selected by
+OMP. OMP remains responsible for the agent loop, session journal, Goal state,
+tool policy, approval, execution, and persistence.
 
-The ownership split is:
+The provider does not wrap ChatGPT Web behind another LLM.
+
+## Ownership
 
 | Responsibility | Owner |
 | --- | --- |
-| LLM reasoning / next action | ChatGPT Web |
+| Model reasoning / next action | ChatGPT Web |
 | Agent loop | OMP |
-| `/goal` state and continuation | OMP |
-| Tool approval and execution | OMP |
+| Goal state and continuation | OMP |
+| Tool catalog | OMP provider context |
+| Tool validation and execution | OMP |
 | Session history | OMP |
-| Browser authentication | dedicated ChatGPT profile |
-| MCP transport | OpenAI Secure MCP Tunnel |
+| ChatGPT login | dedicated persistent browser profile |
+| Browser automation | shared `ChatGptBrowserBackend` |
+| Local MCP bridge | shared `TurnBroker` + MCP server |
+| Remote MCP transport | OpenAI Secure MCP Tunnel |
 
-## Turn lifecycle
+## Process-level runtime
 
-### 1. OMP calls the custom provider
-
-The extension registers `chatgpt-web/web` with a custom `streamSimple`.
-OMP passes its ordinary provider `Context`:
-
-- system prompt,
-- conversation messages,
-- active tools.
-
-The provider allocates a turn token and opens a fresh ChatGPT Temporary Chat.
-The complete OMP text/tool history is serialized into that prompt along with the
-turn contract.
-
-### 2. ChatGPT selects a native OMP tool
-
-The ChatGPT conversation has the fixed `OMP Local` MCP connector attached.
-
-The connector contract does not mirror every OMP tool. Instead ChatGPT calls:
+The OMP extension can be rebound for root sessions and child task/eval sessions.
+The expensive transport resources are therefore module-level singletons:
 
 ```text
-omp_tool_inventory(turn_token)
+shared Web runtime
+  ├─ ChatGptBrowserBackend
+  ├─ TurnBroker
+  ├─ MCP server on 127.0.0.1:8791
+  └─ TunnelSupervisor
 ```
 
-to inspect the current OMP tool catalog and JSON schemas.
+Each provider conversation still owns an independent ChatGPT page:
 
-The inventory is sourced from `Context.tools`, so it reflects the exact tools
-OMP put on that model turn, including a live Goal tool when Goal mode enables it.
-
-### 3. ChatGPT calls `omp_tool_call`
-
-For example:
-
-```json
-{
-  "turn_token": "turn_...",
-  "name": "goal",
-  "arguments": { "op": "get" }
-}
+```text
+root session       -> Temporary Chat A
+task/scout child   -> Temporary Chat B
+review child       -> Temporary Chat C
 ```
 
-The local MCP handler does **not** execute `goal`.
+This avoids duplicate MCP listeners and duplicate tunnel processes while
+preserving browser-thread isolation between agents.
 
-Instead the turn broker creates an OMP-provider action. The custom
-`AssistantMessageEventStream` emits a normal assistant `ToolCall` with that
-name/id/arguments and ends that provider segment with `stopReason: "toolUse"`.
+MCP and tunnel startup are serialized. Chrome/CDP connection startup is also
+serialized so concurrent first turns cannot launch competing browser runtimes.
 
-### 4. OMP executes the native tool
+## Provider identity
 
-From this point OMP sees the same tool call it would have received from any
-native provider. Its ordinary agent loop performs:
+The extension registers:
 
-- argument validation,
-- approval/policy,
-- tool lifecycle events,
-- UI rendering,
-- GoalRuntime updates,
-- persistence,
-- the real tool side effect.
+```text
+provider: chatgpt-web
+model:    web
+api:      chatgpt-web
+```
 
-The result becomes an ordinary `ToolResultMessage`.
+Provider request identity and retained browser conversation identity are
+separate.
 
-### 5. The next provider segment returns the result to ChatGPT
+The provider prefers OMP's `promptCacheKey` for browser conversation ownership
+because side requests may use a derived provider `sessionId` while still
+belonging to the same logical OMP context epoch.
 
-OMP invokes `streamSimple` again with the updated context.
+## Ordinary turn lifecycle
 
-The provider recognizes the pending tool-call id and settles the blocked
-`omp_tool_call` MCP request with the real OMP result. ChatGPT Web therefore
-continues reasoning inside the **same browser response**.
+### 1. OMP calls the provider
 
-No second ChatGPT prompt is submitted for each tool round.
+OMP invokes `streamSimple` with its normal provider context:
 
-### 6. Final answer
+- system prompts
+- conversation messages
+- currently active tools
 
-When ChatGPT has finished the OMP turn, it calls:
+For a new browser conversation the provider compiles the full seed prompt.
+For later turns on the retained conversation it compiles the continuation
+prompt.
+
+### 2. The backend acquires the retained page
+
+A `BrowserSession` is keyed by the stable conversation key.
+
+The first turn creates or claims a Temporary Chat page. Later turns reuse the
+same live page. Temporary Chat pages are never reloaded or rehydrated between
+ordinary turns.
+
+### 3. The exact connector is attached
+
+Before the OMP prompt is inserted, the backend:
+
+1. types the connector mention query
+2. finds exactly one visible row matching the configured connector name
+3. ensures that row is keyboard-highlighted
+4. presses Enter
+5. resolves the possibly replaced composer subtree again
+6. verifies an exact selected-app pill with the configured connector keyword
+
+If this proof fails, the turn fails before prompt submission.
+
+### 4. The prompt is inserted
+
+The provider prompt is inserted as inline composer text. Automated clipboard
+paste is intentionally not used because ChatGPT may promote large automated
+pastes into a separate "Pasted text" attachment.
+
+The backend verifies the inserted content using detached DOM text inspection so
+verification does not force expensive page-wide layout.
+
+### 5. The turn token is used for MCP
+
+The provider creates a `TurnBroker` entry and embeds its opaque token in the
+turn contract.
+
+The public MCP surface is fixed:
+
+```text
+omp_tool_inventory
+omp_tool_call
+omp_turn_complete
+```
+
+This fixed ABI avoids connector schema drift even though OMP's real active tool
+set changes by mode, Goal state, installed extensions, LSP integrations, and
+other MCP servers.
+
+### 6. ChatGPT requests an OMP tool
+
+`omp_tool_inventory` reads the exact tool catalog captured from OMP's current
+provider context.
+
+`omp_tool_call` does not execute the tool directly. It queues a broker action.
+The provider emits a normal assistant `ToolCall` back into OMP with
+`stopReason: "toolUse"`.
+
+OMP then performs its ordinary validation, approvals, tool lifecycle, execution,
+UI rendering, Goal updates, and persistence.
+
+### 7. OMP returns the native ToolResult
+
+OMP invokes the provider again with the new `ToolResultMessage`.
+
+The provider matches the pending OMP tool call and settles the blocked MCP
+request. ChatGPT therefore continues the same browser response instead of
+starting another browser prompt for each tool round.
+
+### 8. ChatGPT completes the model turn
+
+When ChatGPT calls:
 
 ```text
 omp_turn_complete(turn_token, answer)
 ```
 
-The broker exposes that completion to the provider, which emits a normal
-assistant text response with `stopReason: "stop"`.
+the broker exposes the final text to the provider.
 
-The browser tab and turn capability are then retired.
+OMP receives the logical final answer immediately. Browser ownership is kept
+until the ChatGPT UI **physically settles** and the stop-generating control has
+remained absent. This physical-settlement tail happens in the background.
 
-## Why Goal works
+A following ordinary turn and retained compaction both wait for this physical
+ownership to clear, preventing a new request from racing the previous browser
+response.
 
-Goal is not proxied or reimplemented specially.
+If physical settlement never occurs before the configured turn timeout, the
+browser session is invalidated instead of being reused in an ambiguous state.
 
-When OMP Goal mode makes `goal` active, it appears in `Context.tools`.
-Therefore:
+## Retained conversation model
 
-1. `omp_tool_inventory` shows `goal`.
-2. ChatGPT calls `omp_tool_call(... name="goal" ...)`.
-3. OMP receives a native toolCall named `goal`.
-4. OMP's own `GoalRuntime` executes it.
-
-This keeps Goal tokens, completion semantics, continuation, persistence, and UI
-inside OMP.
-
-## Why this does not consume an outer Codex model
-
-Once the selected model is `chatgpt-web/web`, OMP dispatches each model segment
-through this extension's `streamSimple`.
-
-There is no outer LLM deciding whether to invoke a Web worker. The Web provider
-*is* the model transport.
-
-The project contains no call to the Codex inference backend and no model request
-to ChatGPT Work.
-
-## Fixed connector ABI
-
-ChatGPT can cache a custom connector contract by connector identity. OMP tools
-are dynamic, so publishing every OMP tool directly as an MCP method would create
-schema drift.
-
-The public connector therefore remains stable:
-
-- `omp_tool_inventory`
-- `omp_tool_call`
-- `omp_turn_complete`
-
-Turn tokens prevent a stale Web conversation from invoking tools belonging to a
-later OMP turn.
-
-## Context compaction
-
-OMP remains responsible for deciding *when* to compact. Its normal manual,
-threshold, mid-turn, and idle compaction machinery operates on the OMP session
-journal.
-
-The ChatGPT Web provider has a dedicated side-channel for OMP's local
-summarization calls. It recognizes the stable OMP summarization system prompt
-plus the OMP handoff request shape used by automatic compaction:
-
-- full structured summary
-- short PR-style summary
-- split-turn prefix summary
-- handoff document generation (`toolChoice: none` + OMP's handoff marker)
-
-Those calls bypass the turn broker entirely:
+The browser backend keeps one live Temporary Chat per OMP provider conversation.
 
 ```text
-OMP compaction one-shot
-       |
-       v
-fresh Temporary Chat
-       |
-       | text prompt only
-       | no @OMP connector
-       | no MCP / no tool calls
-       v
-summary text
-       |
-       v
-OMP CompactionEntry
+epoch start
+  -> full OMP seed
+
+ordinary continuation
+  -> same page
+  -> continuation prompt
+
+compact
+  -> same retained thread
+  -> summary returned to OMP
+  -> same page navigated to fresh Temporary Chat
+
+next epoch
+  -> full compacted OMP seed
 ```
 
-The side-channel uses a separate browser page even if the same OMP session has
-an active agent turn. Therefore mid-turn compaction does not settle, cancel, or
-replace the active turn's pending MCP request.
+The thread is not assumed to be recoverable after page/browser loss. Temporary
+Chat has no durable conversation URL, so the provider fails over to a fresh
+context rather than attempting history reconstruction.
 
-The browser explicitly refuses a compaction request when the configured OMP
-connector is visibly attached to that fresh composer. This keeps summarization
-tool-free instead of accidentally turning it into another agent loop.
+## Compaction
 
-Provider token usage is still reported as zero because ChatGPT Web does not
-expose authoritative accounting through this browser route. OMP's compaction
-decision is not disabled by that: OMP floors provider-reported context usage
-with its own stored-conversation estimate before testing the compaction
-threshold.
+OMP remains authoritative for deciding **when** compaction is necessary.
 
-Image/snapcompact transport is intentionally outside this provider's scope.
+The provider recognizes OMP's summarization/handoff request shapes. If a usable
+retained browser session exists, compaction:
+
+1. reserves the conversation with a per-session barrier
+2. waits for the previous browser turn to physically settle
+3. submits a short retained-compaction instruction into that same ChatGPT thread
+4. waits for the summary
+5. returns the summary to OMP
+6. resets the same page to a fresh Temporary Chat
+7. releases the barrier
+
+New ordinary turns wait behind this boundary.
+
+A standalone text-only Temporary Chat is only a fallback when there is no
+usable retained browser conversation, for example after browser/session loss.
+
+Text-only fallback requests explicitly verify that the OMP connector is not
+attached.
+
+## Subagents
+
+When the parent session is using `chatgpt-web/web`,
+`before_subagent_spawn` rewrites the child model selection to
+`chatgpt-web/web`.
+
+This means bundled agent defaults such as a scout model alias do not bypass the
+Web provider for that spawn.
+
+Each child receives its own provider session/conversation key and therefore its
+own ChatGPT page, while using the same shared MCP/tunnel/browser process-level
+runtime.
+
+The broker multiplexes simultaneous parent/child MCP traffic by turn token.
+
+## Title utility requests
+
+OMP title generation is a UI utility request rather than an agent turn.
+
+The provider detects OMP's title system marker and generates the short title
+locally. It does not acquire a retained ChatGPT page, connector, turn token, or
+tunnel round trip for this request.
 
 ## Browser lifecycle
 
-A dedicated persistent Chromium profile stores the ChatGPT login. Each active
-provider turn owns one Temporary Chat page. Sequential MCP tool calls stay
-inside that same response.
+### Manual login
 
-The browser worker fails closed when it cannot verify:
+`/web-open` starts ordinary Chrome with the dedicated profile and no remote
+DevTools flag. Authentication therefore occurs outside Playwright automation.
 
-- a ChatGPT composer,
-- the configured connector,
-- visible connector-selected state,
-- submission evidence.
+### Automated provider use
 
-It never silently downgrades to a plain chat without MCP.
+The first Web-model turn reopens that same profile with the configured local CDP
+port and attaches `playwright-core` via `connectOverCDP`.
+
+One browser context is shared by all active provider sessions. Pages are owned
+or reserved so simultaneous root/subagent/side requests cannot accidentally
+claim the same page.
 
 ## Tunnel lifecycle
 
-The local MCP server binds to `127.0.0.1`. When tunnel credentials are present,
-the extension can supervise `openai/tunnel-client` and point it at that
-loopback endpoint. An externally managed tunnel can also be used.
+The MCP server binds only to loopback.
 
-## Security model
+When tunnel credentials are configured, the shared `TunnelSupervisor` starts
+`tunnel-client` with:
 
-The Web model never receives an unrestricted local HTTP endpoint. Its calls are
-scoped by a per-turn token and by the exact OMP tool set captured from the
-provider context.
+```text
+run
+--mcp.server-url <local MCP URL>
+--health.listen-addr 127.0.0.1:0
+--health.url-file <temporary file>
+--log.level=info
+```
 
-More importantly, `omp_tool_call` cannot directly mutate files or execute
-commands. It only asks the OMP agent loop to emit a tool call; OMP remains the
-execution and approval authority.
+Readiness is determined from the tunnel client's local `/readyz` endpoint.
 
-## Known gaps
+The executable path can be persisted explicitly. Windows discovery also checks
+common Go, Scoop, WinGet, Chocolatey, and user-local binary locations before
+falling back to `PATH`.
 
-- Browser selectors need real-account qualification across ChatGPT UI variants.
-- Image input and snapcompact are intentionally unsupported.
-- Accurate ChatGPT Web token usage is not available through this route, so this
-  MVP reports zero provider token usage.
-- Title/advisor side-channel calls are not yet specially optimized.
-- Connector/tool round-trip deadlines must remain below the Secure MCP Tunnel
-  response timeout.
+## Failure policy
+
+The provider fails closed around connector and submission state.
+
+Examples:
+
+- no exact connector row -> no prompt submission
+- no exact selected connector pill -> no prompt submission
+- failed prompt verification -> no Enter
+- ambiguous failure after Enter -> invalidate the browser session
+- failure before Enter -> preserve the retained page and clear only the draft
+- physical turn settlement timeout -> invalidate the retained browser session
+
+No plain-chat fallback is used for an ordinary agent turn that was expected to
+have OMP Local attached.
+
+## Security boundary
+
+The fixed MCP bridge does not directly execute local filesystem or shell
+actions.
+
+`omp_tool_call` can only request a tool that OMP exposed for the current turn,
+and OMP remains responsible for validation, approval, and execution.
+
+Turn tokens are scoped to active broker state. Expired tokens cannot access a
+later turn's tools.
+
+The provider does not use Codex, ChatGPT Work, Responses API, or Chat
+Completions API as an inference fallback.
+
+## Known integration limits
+
+- ChatGPT composer and Apps selectors can change without notice.
+- Large inline prompts can be slower to inject into a long retained page than a
+  human clipboard paste.
+- ChatGPT Web does not expose authoritative token accounting through this
+  browser route, so provider usage remains zero.
+- The provider is text-only.
+- Real-account ChatGPT + Secure MCP Tunnel behavior still requires live smoke
+  testing in addition to unit/CI coverage.
