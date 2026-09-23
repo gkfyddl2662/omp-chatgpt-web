@@ -16,6 +16,7 @@ export interface TunnelStatus {
 export interface TunnelDiagnostics extends TunnelStatus {
   readyz?: { status: number; body: string };
   health?: unknown;
+  mcpHealth?: unknown;
   recentLogs?: string;
 }
 
@@ -72,6 +73,22 @@ export class TunnelSupervisor {
       result.readyz = {
         status: 0,
         body: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    try {
+      const mcpHealth = await fetch(this.#healthBaseUrl + "/health/mcp", {
+        signal: AbortSignal.timeout(2_000),
+      });
+      const text = await mcpHealth.text();
+      try {
+        result.mcpHealth = JSON.parse(text);
+      } catch {
+        result.mcpHealth = { status: mcpHealth.status, body: text.trim() };
+      }
+    } catch (error) {
+      result.mcpHealth = {
+        error: error instanceof Error ? error.message : String(error),
       };
     }
 
