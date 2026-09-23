@@ -42,8 +42,6 @@ interface BrowserSession {
 interface BrowserPreparationTiming {
   promptChars: number;
   sessionMs: number;
-  rehydrateEligible: boolean;
-  rehydrateMs: number;
   mentionMs: number;
   insertMs: number;
   insertMode: "execCommand" | "cdp";
@@ -378,43 +376,6 @@ export class ChatGptBrowserBackend {
     ]);
   }
 
-  #canRehydrateRetainedPage(page: Page): boolean {
-    try {
-      const url = new URL(page.url());
-      if (url.origin !== "https://chatgpt.com") return false;
-
-      // Only reload a URL that visibly identifies an existing conversation.
-      // Never reload the generic Temporary Chat entrypoint because that may
-      // create a new empty temporary conversation and lose retained context.
-      return /^\/c\/[^/?#]+(?:\/|$)/.test(url.pathname);
-    } catch {
-      return false;
-    }
-  }
-
-  async #rehydrateRetainedPage(
-    session: BrowserSession,
-  ): Promise<boolean> {
-    if (!session.seeded || !this.#canRehydrateRetainedPage(session.page)) {
-      return false;
-    }
-
-    const urlBefore = session.page.url();
-    await session.page.reload({
-      waitUntil: "domcontentloaded",
-      timeout: 60_000,
-    });
-    await this.#requireComposer(session.page);
-
-    if (session.page.url() !== urlBefore) {
-      throw new Error(
-        "ChatGPT changed the retained conversation URL during background rehydration.",
-      );
-    }
-
-    return true;
-  }
-
   async #recoverUnsubmittedTurn(
     sessionKey: string,
     composer?: Locator,
@@ -452,17 +413,9 @@ export class ChatGptBrowserBackend {
     }
     const sessionReadyAt = Date.now();
 
-    // Retained ChatGPT pages can accumulate expensive frontend/editor state.
-    // If this is a real /c/<id> conversation URL, reload that SAME conversation
-    // in the background before the next turn. Generic temporary-chat URLs are
-    // deliberately left untouched to avoid losing the retained thread.
-    const rehydrateEligible =
-      session.seeded && this.#canRehydrateRetainedPage(session.page);
-    if (rehydrateEligible) {
-      await this.#rehydrateRetainedPage(session);
-    }
-    const rehydratedAt = Date.now();
-
+    // OMP ChatGPT Web intentionally keeps retained work on Temporary Chat.
+    // Do not reload/rehydrate the page between turns: a temporary conversation
+    // has no durable /c/<id> URL whose history can be safely reconstructed.
     const page = session.page;
     let composer: Locator;
     try {
@@ -519,9 +472,7 @@ export class ChatGptBrowserBackend {
       this.#lastPreparation = {
         promptChars: prompt.length,
         sessionMs: sessionReadyAt - preparationStartedAt,
-        rehydrateEligible,
-        rehydrateMs: rehydratedAt - sessionReadyAt,
-        mentionMs: mentionReadyAt - rehydratedAt,
+        mentionMs: mentionReadyAt - sessionReadyAt,
         insertMs: insertedAt - mentionReadyAt,
         insertMode: insertion.mode,
         insertEditMs: insertion.editMs,
