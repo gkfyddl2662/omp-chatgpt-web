@@ -43,7 +43,7 @@ export class ChatGptBrowserBackend {
         "--user-data-dir=" + config.browserProfileDir,
         "--no-first-run",
         "--no-default-browser-check",
-        "https://chatgpt.com/",
+        "about:blank",
       ],
       {
         detached: true,
@@ -97,19 +97,61 @@ export class ChatGptBrowserBackend {
   }
 
   async #connect(config: RuntimeConfig): Promise<BrowserContext> {
-    if (this.#context) return this.#context;
+    if (this.#browser?.isConnected() && this.#context) {
+      return this.#context;
+    }
+
+    // The user may have closed the Chrome window manually while OMP still held
+    // Playwright objects. Drop those stale handles before reconnecting.
+    this.#browser = undefined;
+    this.#context = undefined;
 
     await this.#openAutomation(config);
 
     const endpoint = "http://127.0.0.1:" + config.browserCdpPort;
-    this.#browser = await chromium.connectOverCDP(endpoint);
-    this.#context = this.#browser.contexts()[0];
+    const browser = await chromium.connectOverCDP(endpoint);
+    const context = browser.contexts()[0];
 
-    if (!this.#context) {
+    if (!context) {
+      await browser.close().catch(() => undefined);
       throw new Error("Connected to Chrome over CDP but no browser context was available.");
     }
 
-    return this.#context;
+    this.#browser = browser;
+    this.#context = context;
+
+    browser.once("disconnected", () => {
+      if (this.#browser === browser) {
+        this.#browser = undefined;
+        this.#context = undefined;
+      }
+    });
+
+    return context;
+  }
+
+  async #newPage(config: RuntimeConfig): Promise<Page> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const context = await this.#connect(config);
+        return await context.newPage();
+      } catch (error) {
+        lastError = error;
+        this.#browser = undefined;
+        this.#context = undefined;
+
+        if (attempt === 0) {
+          await sleep(300);
+          continue;
+        }
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(String(lastError));
   }
 
   async #cdpReady(endpoint: string): Promise<boolean> {
@@ -127,7 +169,7 @@ export class ChatGptBrowserBackend {
       : Boolean(this.#context);
     return {
       open,
-      attached: Boolean(this.#context),
+      attached: Boolean(this.#browser?.isConnected() && this.#context),
       activeTurns: this.#turns.size,
       urls: [...this.#turns.values()].map(turn => turn.page.url()),
     };
@@ -141,12 +183,7 @@ export class ChatGptBrowserBackend {
     if (this.#turns.has(sessionKey)) {
       throw new Error("ChatGPT Web turn already exists for session " + sessionKey);
     }
-    const context = await this.#connect(config);
-    const existing = context.pages().find(page => page.url().startsWith("https://chatgpt.com/"));
-    const page = this.#turns.size === 0 && existing
-      ? existing
-      : await context.newPage();
-
+    const page = await this.#newPage(config);
     await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
     const composer = await this.#requireComposer(page);
     await this.#mentionConnector(page, composer, config.connectorName);
@@ -176,8 +213,7 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
-    const context = await this.#connect(config);
-    const page = await context.newPage();
+    const page = await this.#newPage(config);
     try {
       if (signal?.aborted) {
         throw signal.reason ?? new DOMException("Text-only Web request aborted", "AbortError");
