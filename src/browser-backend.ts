@@ -37,6 +37,32 @@ export class ChatGptBrowserBackend {
 
     await mkdir(config.browserProfileDir, { recursive: true });
 
+    const child = spawn(
+      config.browserExecutable,
+      [
+        "--user-data-dir=" + config.browserProfileDir,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://chatgpt.com/",
+      ],
+      {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: false,
+      },
+    );
+    child.unref();
+  }
+
+  async #openAutomation(config: RuntimeConfig): Promise<void> {
+    if (!config.browserExecutable) {
+      throw new Error(
+        "No Chrome/Chromium executable was found. Set OMP_CHATGPT_WEB_BROWSER to the browser executable.",
+      );
+    }
+
+    await mkdir(config.browserProfileDir, { recursive: true });
+
     const endpoint = "http://127.0.0.1:" + config.browserCdpPort;
     if (await this.#cdpReady(endpoint)) return;
 
@@ -64,16 +90,16 @@ export class ChatGptBrowserBackend {
     }
 
     throw new Error(
-      "Chrome opened but its DevTools endpoint did not become ready on " +
+      "Chrome automation endpoint did not become ready on " +
         endpoint +
-        ". Close Chrome processes using the OMP profile and retry /web-open.",
+        ". If the manual /web-open login Chrome is still open, close that window completely and retry the model turn.",
     );
   }
 
   async #connect(config: RuntimeConfig): Promise<BrowserContext> {
     if (this.#context) return this.#context;
 
-    await this.openLogin(config);
+    await this.#openAutomation(config);
 
     const endpoint = "http://127.0.0.1:" + config.browserCdpPort;
     this.#browser = await chromium.connectOverCDP(endpoint);
