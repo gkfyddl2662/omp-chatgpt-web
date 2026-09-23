@@ -1375,7 +1375,7 @@ export class ChatGptBrowserBackend {
 
     await composer.press("Enter");
 
-    // Connector selection can replace the Lexical composer subtree. Resolve
+    // Connector selection can replace the active editor/composer subtree. Resolve
     // the active composer again, then fail closed unless the exact app pill is
     // present. This prevents a first turn from silently proceeding unbound.
     const selectedComposer = await this.#requireComposer(page);
