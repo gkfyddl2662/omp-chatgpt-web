@@ -276,10 +276,33 @@ the built-in help and available subcommands.
 | `/web set browser <path>` | Persist an explicit browser executable |
 | `/web set cdp <port>` | Persist the local Chrome DevTools port |
 | `/web set subagents <count>` | Persist the Web subagent hard cap (`-1`/`off` = unlimited) |
-| `/web unset tunnel\|api\|tunnel-bin\|connector\|browser\|subagents` | Clear a persisted value or restore the default subagent cap |
+| `/web set insert default\|lexical` | Select the composer insertion strategy; `lexical` is an experimental direct Lexical-editor fast path |
+| `/web unset tunnel\|api\|tunnel-bin\|connector\|browser\|subagents\|insert` | Clear a persisted value, restore the default subagent cap, or restore the default insert strategy |
 
 The older `/web-open`, `/web-use`, `/web-status`, `/web-tunnel`, and
 `/web-config` commands remain available as compatibility aliases.
+
+### Experimental Lexical insertion
+
+Large OMP prompts can spend minutes inside Chromium's contenteditable insertion
+path. To test a direct editor-state path without changing prompt content:
+
+```text
+/web set insert lexical
+```
+
+When available, the provider discovers ChatGPT's Lexical editor from the
+composer DOM and dispatches its registered
+`CONTROLLED_TEXT_INSERTION_COMMAND` once with the complete prompt. Successful
+turns report `mode=lexical` in `/web status`.
+
+If the current ChatGPT build does not expose the expected Lexical editor or
+command, the attempt does not mutate the composer and falls back to the normal
+`execCommand` / CDP path. To restore the normal strategy:
+
+```text
+/web set insert default
+```
 
 ## Diagnostics
 
