@@ -241,6 +241,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
             "tabs: " + browserStatus.tabs,
             "retained sessions: " + browserStatus.retainedSessions,
             "active Web turns: " + browserStatus.activeTurns,
+            "pending compactions: " + browserStatus.pendingCompactions,
             ...(browserStatus.lastPreparation
               ? [
                   "last prompt chars: " + browserStatus.lastPreparation.promptChars,
