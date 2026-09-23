@@ -154,6 +154,35 @@ export class ChatGptBrowserBackend {
       : new Error(String(lastError));
   }
 
+  async #openChatPage(config: RuntimeConfig): Promise<Page> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const page = await this.#newPage(config);
+      try {
+        await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
+        return page;
+      } catch (error) {
+        lastError = error;
+        await page.close().catch(() => undefined);
+
+        const message = error instanceof Error ? error.message : String(error);
+        const retryable =
+          /ERR_ABORTED|Target page, context or browser has been closed|has been closed/i.test(message);
+
+        if (!retryable || attempt > 0) throw error;
+
+        this.#browser = undefined;
+        this.#context = undefined;
+        await sleep(350);
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(String(lastError));
+  }
+
   async #cdpReady(endpoint: string): Promise<boolean> {
     try {
       const response = await fetch(endpoint + "/json/version", { signal: AbortSignal.timeout(750) });
@@ -183,10 +212,15 @@ export class ChatGptBrowserBackend {
     if (this.#turns.has(sessionKey)) {
       throw new Error("ChatGPT Web turn already exists for session " + sessionKey);
     }
-    const page = await this.#newPage(config);
-    await page.goto(config.chatUrl, { waitUntil: "domcontentloaded" });
-    const composer = await this.#requireComposer(page);
-    await this.#mentionConnector(page, composer, config.connectorName);
+    const page = await this.#openChatPage(config);
+    let composer: Locator;
+    try {
+      composer = await this.#requireComposer(page);
+      await this.#mentionConnector(page, composer, config.connectorName);
+    } catch (error) {
+      await page.close().catch(() => undefined);
+      throw error;
+    }
 
     const turn: BrowserTurn = { page };
     this.#turns.set(sessionKey, turn);
@@ -213,7 +247,7 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
-    const page = await this.#newPage(config);
+    const page = await this.#openChatPage(config);
     try {
       if (signal?.aborted) {
         throw signal.reason ?? new DOMException("Text-only Web request aborted", "AbortError");
