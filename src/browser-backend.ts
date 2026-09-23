@@ -710,6 +710,7 @@ export class ChatGptBrowserBackend {
       .locator('[data-message-author-role="user"]')
       .count()
       .catch(() => 0);
+    const errorBaseline = await this.#chatErrorBaseline(page);
 
     try {
       const insertion = await this.#insertComposerText(
@@ -742,6 +743,7 @@ export class ChatGptBrowserBackend {
           config.turnTimeoutMs,
           signal,
           baselineAssistants,
+          errorBaseline,
         ),
         prompt,
       );
@@ -1532,29 +1534,51 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #chatErrorState(page: Page): Promise<{
+  async #chatErrorBaseline(page: Page): Promise<{
+    retryCount: number;
+    errorTextCount: number;
+  }> {
+    const retryButtons = page.getByRole("button", {
+      name: /Retry|Try again|다시 시도/i,
+    });
+    const errorText = page.getByText(
+      /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다/i,
+    );
+    return {
+      retryCount: await retryButtons.count().catch(() => 0),
+      errorTextCount: await errorText.count().catch(() => 0),
+    };
+  }
+
+  async #chatErrorState(
+    page: Page,
+    baseline?: { retryCount: number; errorTextCount: number },
+  ): Promise<{
     message: string;
     retry?: Locator;
   } | undefined> {
-    const retry = await firstVisible(
-      [
-        page.getByRole("button", { name: /Retry|Try again|다시 시도/i }),
-        page.locator("button").filter({
-          hasText: /Retry|Try again|다시 시도/i,
-        }),
-      ],
-      100,
+    const retryButtons = page.getByRole("button", {
+      name: /Retry|Try again|다시 시도/i,
+    });
+    const errorTexts = page.getByText(
+      /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다/i,
     );
 
-    const errorText = await firstVisible(
-      [
-        page.getByText(
-          /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center/i,
-        ),
-        page.getByText(/문제가 발생했습니다|오류가 발생했습니다/),
-      ],
-      100,
-    );
+    const retryCount = await retryButtons.count().catch(() => 0);
+    const errorTextCount = await errorTexts.count().catch(() => 0);
+    const hasNewRetry =
+      retryCount > (baseline?.retryCount ?? 0);
+    const hasNewErrorText =
+      errorTextCount > (baseline?.errorTextCount ?? 0);
+
+    if (!hasNewRetry && !hasNewErrorText) return undefined;
+
+    const retry = hasNewRetry
+      ? await firstVisible([retryButtons.nth(retryCount - 1)], 100)
+      : undefined;
+    const errorText = hasNewErrorText
+      ? await firstVisible([errorTexts.nth(errorTextCount - 1)], 100)
+      : undefined;
 
     if (!retry && !errorText) return undefined;
 
@@ -1621,6 +1645,7 @@ export class ChatGptBrowserBackend {
     timeoutMs: number,
     signal?: AbortSignal,
     baselineAssistantTurns = 0,
+    errorBaseline?: { retryCount: number; errorTextCount: number },
   ): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     let lastText = "";
@@ -1634,7 +1659,7 @@ export class ChatGptBrowserBackend {
       }
       if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
 
-      const errorState = await this.#chatErrorState(page);
+      const errorState = await this.#chatErrorState(page, errorBaseline);
       if (errorState) {
         if (retryAttempts < 1 && errorState.retry) {
           retryAttempts += 1;
@@ -1676,7 +1701,7 @@ export class ChatGptBrowserBackend {
         Date.now() - stableSince >= 1_500 &&
         !stop
       ) {
-        const finalErrorState = await this.#chatErrorState(page);
+        const finalErrorState = await this.#chatErrorState(page, errorBaseline);
         if (finalErrorState) {
           throw new Error(
             "ChatGPT Web returned an error instead of a valid response: " +
