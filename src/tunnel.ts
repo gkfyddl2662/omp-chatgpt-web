@@ -184,8 +184,9 @@ export class TunnelSupervisor {
       if (!this.#healthBaseUrl && this.#healthUrlFile) {
         try {
           const value = (await readFile(this.#healthUrlFile, "utf8")).trim();
-          if (/^https?:\/\/127\.0\.0\.1:\d+$/.test(value)) {
-            this.#healthBaseUrl = value;
+          const normalized = value.replace(/\/+$/, "");
+          if (/^https?:\/\/127\.0\.0\.1:\d+$/.test(normalized)) {
+            this.#healthBaseUrl = normalized;
           }
         } catch {
           // URL file is created asynchronously by tunnel-client.
