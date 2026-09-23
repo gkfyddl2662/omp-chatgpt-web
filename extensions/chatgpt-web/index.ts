@@ -35,15 +35,16 @@ type SubagentContext = {
   sessionManager: {
     getSessionId(): string;
     getSessionFile(): string | undefined;
-    getHeader(): { parentSession?: string };
+    getHeader(): { parentSession?: string } | null;
   };
 };
 
 function subagentRootKey(ctx: SubagentContext): string {
+  const header = ctx.sessionManager.getHeader();
   return resolveSubagentRootKey({
     sessionId: ctx.sessionManager.getSessionId(),
     sessionFile: ctx.sessionManager.getSessionFile(),
-    parentSession: ctx.sessionManager.getHeader().parentSession,
+    parentSession: header?.parentSession,
   });
 }
 
