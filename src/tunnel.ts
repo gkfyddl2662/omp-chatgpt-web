@@ -45,9 +45,18 @@ export class TunnelSupervisor {
 
   async diagnostics(config: RuntimeConfig): Promise<TunnelDiagnostics> {
     const base = this.status(config);
+    const relevantLogs = this.#recentLogs
+      .split(/\r?\n/)
+      .filter(line =>
+        /mcpclient|dispatcher|controlplane|server\/discover|tools\/list|tools\/call|rpc_method|status_code|429|404|WARN|ERROR|ready|response/i.test(line)
+      )
+      .slice(-80)
+      .join("\n")
+      .trim();
+
     const result: TunnelDiagnostics = {
       ...base,
-      recentLogs: this.#recentLogs.trim() || undefined,
+      recentLogs: relevantLogs || undefined,
     };
     if (!this.#healthBaseUrl) return result;
 
@@ -71,10 +80,19 @@ export class TunnelSupervisor {
         signal: AbortSignal.timeout(2_000),
       });
       const text = await health.text();
-      try {
-        result.health = JSON.parse(text);
-      } catch {
-        result.health = { status: health.status, body: text.trim() };
+      if (health.status !== 404) {
+        try {
+          result.health = JSON.parse(text);
+        } catch {
+          result.health = { status: health.status, body: text.trim() };
+        }
+      } else {
+        result.health = {
+          status: 404,
+          note:
+            "Detailed /health endpoint is unavailable in this tunnel-client build; " +
+            "/readyz remains the readiness source of truth.",
+        };
       }
     } catch (error) {
       result.health = {
