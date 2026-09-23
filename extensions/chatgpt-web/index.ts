@@ -76,7 +76,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
       try {
         await browser.openLogin(config);
         ctx.ui.notify(
-          'Chrome opened with the dedicated OMP profile. Sign in to ChatGPT now; Playwright will attach only after login when a model turn starts.',
+          'Ordinary Chrome opened with the dedicated OMP profile and no automation/debugging flags. Sign in to ChatGPT, then CLOSE that Chrome window completely. The first Web-model turn will reopen the same profile and attach over CDP.',
           "info",
         );
       } catch (error) {
