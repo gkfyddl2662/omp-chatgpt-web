@@ -10,13 +10,17 @@ import {
   type ToolResultMessage,
   type Usage,
 } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { RuntimeConfig } from "./config.js";
 import {
   assertValidCompactionSummary,
   compileRetainedCompactionPrompt,
   isOmpCompactionContext,
 } from "./compaction.js";
-import type { ChatGptBrowserBackend } from "./browser-backend.js";
+import {
+  ChatGptReplayUnsafeTurnError,
+  type ChatGptBrowserBackend,
+} from "./browser-backend.js";
 import {
   compileBrowserContinuationPrompt,
   compileBrowserPrompt,
@@ -103,10 +107,14 @@ function pushText(stream: AssistantMessageEventStream, model: Model, text: strin
 }
 
 function pushError(stream: AssistantMessageEventStream, model: Model, error: unknown): void {
+  const replaySuppressed = error instanceof ChatGptReplayUnsafeTurnError;
   const message = error instanceof Error ? error.message : String(error);
   const assistant: AssistantMessage = {
     ...baseMessage(model, "error"),
     errorMessage: message,
+    ...(replaySuppressed
+      ? { errorId: AIError.create(AIError.Flag.UserInterrupt) }
+      : {}),
   };
   stream.push({ type: "error", reason: "error", error: assistant });
 }
@@ -311,7 +319,21 @@ export class WebModelProvider {
 
       const timeoutSignal = AbortSignal.timeout(this.#config.turnTimeoutMs);
       const actionSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-      const action = await this.#broker.nextAction(request, actionSignal);
+      const failureMonitorAbort = new AbortController();
+      const failureSignal = signal
+        ? AbortSignal.any([signal, failureMonitorAbort.signal])
+        : failureMonitorAbort.signal;
+
+      let action: Awaited<ReturnType<TurnBroker["nextAction"]>>;
+      try {
+        action = await Promise.race([
+          this.#broker.nextAction(request, actionSignal),
+          this.#browser.waitForTurnFailure(conversation, failureSignal),
+        ]);
+      } finally {
+        failureMonitorAbort.abort();
+      }
+
       if (action.type === "tool") {
         pushToolCall(stream, model, action);
         return;
