@@ -248,6 +248,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
                   "prep ms: session=" + browserStatus.lastPreparation.sessionMs +
                     " mention=" + browserStatus.lastPreparation.mentionMs +
                     " insert=" + browserStatus.lastPreparation.insertMs +
+                    " (" + browserStatus.lastPreparation.insertMode + ")" +
                     " submit=" + browserStatus.lastPreparation.submitMs,
                 ]
               : []),
