@@ -23,6 +23,32 @@ async function rpc(url: string, id: number, method: string, params: Record<strin
   return await response.json() as Record<string, any>;
 }
 
+
+test("supports MCP 2026-07-28 server/discover", async (t) => {
+  const broker = new TurnBroker();
+  const server = await createMcpServer({ host: "127.0.0.1", port: 0, broker });
+  t.after(() => server.close());
+
+  const discover = await rpc(server.url, 100, "server/discover", {
+    _meta: {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {
+        name: "ChatGPT",
+        version: "test",
+      },
+      "io.modelcontextprotocol/clientCapabilities": {},
+    },
+  });
+
+  assert.equal(discover.result.resultType, "complete");
+  assert.deepEqual(discover.result.supportedVersions, ["2026-07-28"]);
+  assert.deepEqual(discover.result.capabilities, { tools: {} });
+  assert.equal(
+    discover.result._meta["io.modelcontextprotocol/serverInfo"].name,
+    "omp-chatgpt-web",
+  );
+});
+
 test("fixed MCP ABI inventories and invokes turn-local OMP tools", async (t) => {
   const broker = new TurnBroker({ toolTimeoutMs: 2_000 });
   const { token } = broker.begin("s", tools);
