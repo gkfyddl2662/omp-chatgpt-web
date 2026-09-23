@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { Tool, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 export interface BrowserToolDescriptor {
   name: string;
@@ -73,13 +72,42 @@ export interface BeginTurnResult {
   reused: boolean;
 }
 
+export type ToolSchemaProjector = (
+  tool: Tool,
+) => Record<string, unknown>;
+
+function defaultToolSchemaProjector(tool: Tool): Record<string, unknown> {
+  const parameters = tool.parameters as unknown;
+  if (parameters && typeof parameters === "object" && !Array.isArray(parameters)) {
+    return parameters as Record<string, unknown>;
+  }
+
+  if (typeof parameters === "function") {
+    const toJsonSchema = Reflect.get(parameters, "toJsonSchema");
+    if (typeof toJsonSchema === "function") {
+      const schema = Reflect.apply(toJsonSchema, parameters, []);
+      if (schema && typeof schema === "object" && !Array.isArray(schema)) {
+        return schema as Record<string, unknown>;
+      }
+    }
+  }
+
+  return {};
+}
+
 export class TurnBroker {
   readonly #bySession = new Map<string, TurnState>();
   readonly #byToken = new Map<string, TurnState>();
   readonly #toolTimeoutMs: number;
+  readonly #schemaForTool: ToolSchemaProjector;
 
-  constructor(options?: { toolTimeoutMs?: number }) {
+  constructor(options?: {
+    toolTimeoutMs?: number;
+    schemaForTool?: ToolSchemaProjector;
+  }) {
     this.#toolTimeoutMs = options?.toolTimeoutMs ?? 85_000;
+    this.#schemaForTool =
+      options?.schemaForTool ?? defaultToolSchemaProjector;
   }
 
   begin(sessionKey: string, tools: readonly Tool[]): BeginTurnResult {
@@ -134,7 +162,7 @@ export class TurnBroker {
     const page = matches.slice(offset, offset + limit).map(tool => ({
       name: tool.name,
       description: tool.description,
-      parameters: includeSchema ? toolWireSchema(tool) : {},
+      parameters: includeSchema ? this.#schemaForTool(tool) : {},
     }));
     return {
       tools: page,
