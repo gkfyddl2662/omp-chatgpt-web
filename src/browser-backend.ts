@@ -53,6 +53,7 @@ interface BrowserPreparationTiming {
 export class ChatGptBrowserBackend {
   #browser?: Browser;
   #context?: BrowserContext;
+  #connecting?: Promise<BrowserContext>;
   readonly #turns = new Map<string, BrowserTurn>();
   readonly #sessions = new Map<string, BrowserSession>();
   readonly #reservedPages = new Set<Page>();
@@ -133,7 +134,18 @@ export class ChatGptBrowserBackend {
     if (this.#browser?.isConnected() && this.#context) {
       return this.#context;
     }
+    if (this.#connecting) return await this.#connecting;
 
+    const connecting = this.#connectFresh(config);
+    this.#connecting = connecting;
+    try {
+      return await connecting;
+    } finally {
+      if (this.#connecting === connecting) this.#connecting = undefined;
+    }
+  }
+
+  async #connectFresh(config: RuntimeConfig): Promise<BrowserContext> {
     this.#browser = undefined;
     this.#context = undefined;
     this.#pruneClosedSessions();
@@ -728,6 +740,7 @@ export class ChatGptBrowserBackend {
     const browser = this.#browser;
     this.#browser = undefined;
     this.#context = undefined;
+    this.#connecting = undefined;
     if (browser) await browser.close();
   }
 
