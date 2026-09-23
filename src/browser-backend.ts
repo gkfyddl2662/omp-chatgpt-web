@@ -274,14 +274,42 @@ export class ChatGptBrowserBackend {
       : new Error(String(lastError));
   }
 
+  async #releasePageWithoutStoppingBrowser(page: Page): Promise<void> {
+    this.#reservedPages.delete(page);
+    if (page.isClosed()) return;
+
+    const context = this.#context;
+    const hasOtherOpenPage = Boolean(
+      context?.pages().some(candidate =>
+        candidate !== page && !candidate.isClosed()
+      ),
+    );
+
+    if (hasOtherOpenPage) {
+      await page.close().catch(() => undefined);
+      return;
+    }
+
+    // Closing Chrome's final tab can tear down the whole dedicated automation
+    // browser. Retire the stale/transient surface to about:blank instead so
+    // the process stays warm and the next request can reuse this page.
+    try {
+      await page.goto("about:blank", {
+        waitUntil: "domcontentloaded",
+        timeout: 5_000,
+      });
+    } catch {
+      await page.close().catch(() => undefined);
+    }
+  }
+
   async #newSessionPage(config: RuntimeConfig): Promise<Page> {
     const page = await this.#acquireUnownedPage(config);
     try {
       await this.#navigateFreshChat(page, config);
       return page;
     } catch (error) {
-      this.#reservedPages.delete(page);
-      await page.close().catch(() => undefined);
+      await this.#releasePageWithoutStoppingBrowser(page);
       throw error;
     }
   }
@@ -557,17 +585,33 @@ export class ChatGptBrowserBackend {
     const session = this.#sessions.get(sessionKey);
     if (!session) return;
 
-    if (session.page.isClosed() || !this.#browser?.isConnected()) {
+    const previousPage = session.page;
+    if (previousPage.isClosed() || !this.#browser?.isConnected()) {
       this.#sessions.delete(sessionKey);
       return;
     }
 
+    // Prepare the fresh Temporary Chat first. Only after the replacement is
+    // fully usable do we retire the compacted conversation. This prevents the
+    // visible "last tab closes -> Chrome exits -> Chrome relaunches" cycle.
+    let replacement: Page;
     try {
-      await this.#navigateFreshChat(session.page, config);
-      session.seeded = false;
-    } catch {
-      await this.invalidateSession(sessionKey);
+      replacement = await this.#newSessionPage(config);
+    } catch (error) {
+      // The compacted thread must not receive an ordinary full seed after its
+      // history was rewritten. Remove ownership, but keep Chrome alive by
+      // retiring the stale page to about:blank when it is the final tab.
+      this.#sessions.delete(sessionKey);
+      await this.#releasePageWithoutStoppingBrowser(previousPage);
+      throw error;
     }
+
+    this.#sessions.set(sessionKey, {
+      page: replacement,
+      seeded: false,
+    });
+    this.#reservedPages.delete(replacement);
+    await this.#releasePageWithoutStoppingBrowser(previousPage);
   }
 
   async compactRetainedSessionWhenIdle(
@@ -723,7 +767,7 @@ export class ChatGptBrowserBackend {
     const session = this.#sessions.get(sessionKey);
     this.#sessions.delete(sessionKey);
     if (session && !session.page.isClosed()) {
-      await session.page.close().catch(() => undefined);
+      await this.#releasePageWithoutStoppingBrowser(session.page);
     }
   }
 
