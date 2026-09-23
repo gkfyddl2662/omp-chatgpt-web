@@ -163,7 +163,8 @@ first turn    -> full OMP context seed
 later turns   -> same ChatGPT thread + OMP continuation delta
 compact       -> same retained thread
 summary       -> returned to OMP
-after compact -> same tab reset to a fresh Temporary Chat
+after compact -> fresh replacement Temporary Chat prepared first
+old tab       -> retired only after replacement is ready
 next turn     -> seeds OMP's compacted context
 ```
 
@@ -250,11 +251,16 @@ OMP still decides when context compaction is required.
 
 If a retained ChatGPT thread exists, compaction reserves that thread, waits for
 its previous response to **physically settle**, sends the retained-compaction
-instruction into the same thread, returns the summary to OMP, then resets that
-same tab to a fresh Temporary Chat.
+instruction into the same thread, and returns the summary to OMP. It then
+prepares a fresh replacement Temporary Chat before retiring the compacted tab,
+so the browser never has to close its last tab and relaunch between epochs.
 
-A separate text-only Temporary Chat is used only as a fallback when no usable
-retained browser conversation exists.
+Retained compaction and standalone text-only fallback use the same direct
+composer insertion strategy as ordinary turns
+(ProseMirror -> Lexical -> execCommand -> CDP). A separate text-only Temporary
+Chat is used only when no usable retained browser conversation exists. If that
+transient request owns Chrome's final tab, the tab is retired to `about:blank`
+instead of being closed so the automation browser stays warm.
 
 New ordinary turns are serialized behind the compaction boundary so they cannot
 race the summary/reset handoff.
