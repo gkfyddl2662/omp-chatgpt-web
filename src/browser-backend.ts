@@ -414,6 +414,23 @@ export class ChatGptBrowserBackend {
     return true;
   }
 
+  async #recoverUnsubmittedTurn(
+    sessionKey: string,
+    composer?: Locator,
+  ): Promise<void> {
+    const turn = this.#turns.get(sessionKey);
+    if (turn?.approvalTimer) clearInterval(turn.approvalTimer);
+    this.#turns.delete(sessionKey);
+
+    // Preparation/mention/insertion failures happen before submission is
+    // accepted. Preserve the retained conversation and just clear the draft
+    // instead of closing the only ChatGPT tab. This also prevents an outer
+    // provider retry from relaunching a brand-new Chrome window.
+    if (composer) {
+      await composer.fill("").catch(() => undefined);
+    }
+  }
+
   async startTurn(
     sessionKey: string,
     prompt: string,
@@ -449,7 +466,7 @@ export class ChatGptBrowserBackend {
       composer = await this.#requireComposer(page);
       await this.#mentionConnector(page, composer, config.connectorName);
     } catch (error) {
-      await this.invalidateSession(sessionKey);
+      await this.#recoverUnsubmittedTurn(sessionKey, composer);
       throw error;
     }
     const mentionReadyAt = Date.now();
@@ -469,13 +486,26 @@ export class ChatGptBrowserBackend {
       .count()
       .catch(() => 0);
 
+    let insertion: {
+      mode: "execCommand" | "cdp";
+      editMs: number;
+      verifyMs: number;
+    };
+    let insertedAt: number;
+
     try {
-      const insertion = await this.#insertComposerText(
+      insertion = await this.#insertComposerText(
         page,
         composer,
         " " + prompt,
       );
-      const insertedAt = Date.now();
+      insertedAt = Date.now();
+    } catch (error) {
+      await this.#recoverUnsubmittedTurn(sessionKey, composer);
+      throw error;
+    }
+
+    try {
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page, baselineUsers);
       const submittedAt = Date.now();
@@ -493,6 +523,8 @@ export class ChatGptBrowserBackend {
       session.seeded = true;
       session.lastUsedAt = Date.now();
     } catch (error) {
+      // After Enter, submission state is ambiguous. A retry must not append to
+      // a possibly-submitted retained thread, so invalidate only this case.
       await this.invalidateSession(sessionKey);
       throw error;
     }
