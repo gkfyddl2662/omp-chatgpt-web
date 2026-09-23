@@ -103,15 +103,40 @@ test("obsolete retained-session experiment state is absent", () => {
 
 
 
-test("compaction never replays full OMP history into a fresh fallback tab", () => {
+test("compaction prefers retained Web history and falls back to a fresh maintenance-only Web request", () => {
   const start = providerSource.indexOf("if (isOmpCompactionContext(context, options))");
   const end = providerSource.indexOf("const expectedToolCallId", start);
   assert.ok(start >= 0 && end > start);
   const block = providerSource.slice(start, end);
 
-  assert.doesNotMatch(block, /runTextOnly\(/);
-  assert.match(block, /Refusing full-context fallback/);
-  assert.match(block, /compactRetainedSessionWhenIdle/);
+  assert.match(block, /compileRetainedCompactionPrompt/);
+  assert.match(block, /compileCompactionPrompt/);
+  assert.match(block, /compactSessionWhenIdle/);
+  assert.doesNotMatch(block, /compileBrowserPrompt\(/);
+  assert.doesNotMatch(block, /broker\.begin\(/);
+});
+
+test("fresh context-full maintenance uses plain ChatGPT without OMP Local and resets before the next agent epoch", () => {
+  const routeStart = browserSource.indexOf("async compactSessionWhenIdle(");
+  const routeEnd = browserSource.indexOf("async compactRetainedSessionWhenIdle(", routeStart);
+  assert.ok(routeStart >= 0 && routeEnd > routeStart);
+  const route = browserSource.slice(routeStart, routeEnd);
+
+  assert.match(route, /hasRetainedConversation\(sessionKey\)/);
+  assert.match(route, /compactRetainedSession/);
+  assert.match(route, /compactFreshSession/);
+
+  const freshStart = browserSource.indexOf("async compactFreshSession(");
+  const freshEnd = browserSource.indexOf("async invalidateSession(", freshStart);
+  assert.ok(freshStart >= 0 && freshEnd > freshStart);
+  const fresh = browserSource.slice(freshStart, freshEnd);
+
+  assert.match(fresh, /#prepareCompactionComposer/);
+  assert.match(fresh, /kind: "fresh-compaction"/);
+  assert.match(fresh, /#waitForAssistantText/);
+  assert.match(fresh, /#resetSessionPage/);
+  assert.doesNotMatch(fresh, /#mentionConnector/);
+  assert.doesNotMatch(fresh, /OMP Local/);
 });
 
 test("compaction watches ChatGPT error UI before accepting assistant text", () => {
