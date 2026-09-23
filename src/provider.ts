@@ -11,9 +11,16 @@ import {
   type Usage,
 } from "@oh-my-pi/pi-ai";
 import type { RuntimeConfig } from "./config.js";
-import { compileCompactionPrompt, isOmpCompactionContext } from "./compaction.js";
+import {
+  compileCompactionPrompt,
+  compileRetainedCompactionPrompt,
+  isOmpCompactionContext,
+} from "./compaction.js";
 import type { ChatGptBrowserBackend } from "./browser-backend.js";
-import { compileBrowserPrompt } from "./prompt.js";
+import {
+  compileBrowserContinuationPrompt,
+  compileBrowserPrompt,
+} from "./prompt.js";
 import type { TurnBroker } from "./turn-broker.js";
 
 function zeroUsage(): Usage {
@@ -169,9 +176,37 @@ export class WebModelProvider {
       if (signal?.aborted) throw signal.reason ?? new DOMException("Provider request aborted", "AbortError");
 
       if (isOmpCompactionContext(context, options)) {
-        const prompt = compileCompactionPrompt(context);
-        const summary = await this.#browser.runTextOnly(prompt, this.#config, signal);
-        pushText(stream, model, summary);
+        try {
+          let summary: string;
+          const activeTurn = this.#broker.hasActive(key) || this.#browser.isTurnActive(key);
+
+          if (this.#browser.hasRetainedConversation(key) && !activeTurn) {
+            summary = await this.#browser.compactRetainedSession(
+              key,
+              compileRetainedCompactionPrompt(context),
+              this.#config,
+              signal,
+            );
+          } else {
+            summary = await this.#browser.runTextOnly(
+              compileCompactionPrompt(context),
+              this.#config,
+              signal,
+            );
+
+            if (this.#browser.hasSession(key)) {
+              if (activeTurn) {
+                await this.#browser.markResetAfterTurn(key);
+              } else {
+                await this.#browser.resetSession(key, this.#config);
+              }
+            }
+          }
+
+          pushText(stream, model, summary);
+        } catch (error) {
+          pushError(stream, model, error);
+        }
         return;
       }
 
@@ -184,7 +219,9 @@ export class WebModelProvider {
       if (!this.#broker.hasActive(key)) {
         await this.#ensureTransport();
         const turn = this.#broker.begin(key, context.tools ?? []);
-        const prompt = compileBrowserPrompt(context, turn.token);
+        const prompt = this.#browser.hasRetainedConversation(key)
+          ? compileBrowserContinuationPrompt(context, turn.token)
+          : compileBrowserPrompt(context, turn.token);
         try {
           await this.#browser.startTurn(key, prompt, this.#config);
         } catch (error) {
@@ -203,12 +240,12 @@ export class WebModelProvider {
         return;
       }
 
+      await this.#browser.finishTurn(key, this.#config, signal);
       pushText(stream, model, action.answer);
       this.#broker.end(key);
-      await this.#browser.releaseTurn(key);
     } catch (error) {
       this.#broker.end(key);
-      await this.#browser.releaseTurn(key).catch(() => undefined);
+      await this.#browser.invalidateSession(key).catch(() => undefined);
       pushError(stream, model, error);
     }
   }
