@@ -8,6 +8,7 @@ import {
   type Page,
 } from "playwright-core";
 import type { RuntimeConfig } from "./config.js";
+import { assertValidCompactionSummary } from "./compaction.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -38,7 +39,7 @@ interface BrowserSession {
   seeded: boolean;
 }
 
-type BrowserPreparationKind = "turn" | "retained-compaction" | "text-only";
+type BrowserPreparationKind = "turn" | "retained-compaction";
 
 interface ComposerInsertionTiming {
   mode: "prosemirror" | "lexical" | "execCommand" | "cdp";
@@ -694,7 +695,7 @@ export class ChatGptBrowserBackend {
     const preparationStartedAt = Date.now();
     const page = session.page;
     let composer = await this.#requireComposer(page);
-    composer = await this.#prepareTextOnlyComposer(
+    composer = await this.#prepareCompactionComposer(
       page,
       composer,
       config.connectorName,
@@ -709,6 +710,7 @@ export class ChatGptBrowserBackend {
       .locator('[data-message-author-role="user"]')
       .count()
       .catch(() => 0);
+    const errorBaseline = await this.#chatErrorBaseline(page);
 
     try {
       const insertion = await this.#insertComposerText(
@@ -735,11 +737,15 @@ export class ChatGptBrowserBackend {
         submitMs: submittedAt - insertedAt,
       };
 
-      const summary = await this.#waitForAssistantText(
-        page,
-        config.turnTimeoutMs,
-        signal,
-        baselineAssistants,
+      const summary = assertValidCompactionSummary(
+        await this.#waitForAssistantText(
+          page,
+          config.turnTimeoutMs,
+          signal,
+          baselineAssistants,
+          errorBaseline,
+        ),
+        prompt,
       );
 
       // The compact response is generated from the retained thread, but OMP
@@ -754,71 +760,6 @@ export class ChatGptBrowserBackend {
     }
   }
 
-  async runTextOnly(
-    prompt: string,
-    config: RuntimeConfig,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    const preparationStartedAt = Date.now();
-    const page = await this.#acquireUnownedPage(config);
-    try {
-      await this.#navigateFreshChat(page, config);
-      if (signal?.aborted) {
-        throw signal.reason ??
-          new DOMException("Text-only Web request aborted", "AbortError");
-      }
-
-      let composer = await this.#requireComposer(page);
-      composer = await this.#prepareTextOnlyComposer(
-        page,
-        composer,
-        config.connectorName,
-      );
-      const composerReadyAt = Date.now();
-
-      const baselineAssistants = await page
-        .locator('[data-message-author-role="assistant"]')
-        .count()
-        .catch(() => 0);
-      const baselineUsers = await page
-        .locator('[data-message-author-role="user"]')
-        .count()
-        .catch(() => 0);
-
-      const insertion = await this.#insertComposerText(
-        page,
-        composer,
-        prompt,
-        config.insertMode,
-      );
-      const insertedAt = Date.now();
-
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
-      const submittedAt = Date.now();
-      this.#lastPreparation = {
-        kind: "text-only",
-        promptChars: prompt.length,
-        sessionMs: composerReadyAt - preparationStartedAt,
-        mentionMs: 0,
-        insertMs: insertedAt - composerReadyAt,
-        insertMode: insertion.mode,
-        ...(insertion.detail ? { insertDetail: insertion.detail } : {}),
-        insertEditMs: insertion.editMs,
-        insertVerifyMs: insertion.verifyMs,
-        submitMs: submittedAt - insertedAt,
-      };
-
-      return await this.#waitForAssistantText(
-        page,
-        config.turnTimeoutMs,
-        signal,
-        baselineAssistants,
-      );
-    } finally {
-      await this.#releasePageWithoutStoppingBrowser(page);
-    }
-  }
 
   async invalidateSession(sessionKey: string): Promise<void> {
     const turn = this.#turns.get(sessionKey);
@@ -1515,7 +1456,7 @@ export class ChatGptBrowserBackend {
     );
   }
 
-  async #prepareTextOnlyComposer(
+  async #prepareCompactionComposer(
     page: Page,
     composer: Locator,
     connectorName: string,
@@ -1565,7 +1506,7 @@ export class ChatGptBrowserBackend {
     const attached = await firstVisible([selected, nearComposer], 100);
     if (attached) {
       throw new Error(
-        'Text-only compaction requires a fresh ChatGPT chat with no "' +
+        'Compaction requires the ChatGPT composer to have no "' +
           connectorName +
           '" connector attached.',
       );
@@ -1591,6 +1532,66 @@ export class ChatGptBrowserBackend {
     throw new Error(
       "ChatGPT Web did not show evidence that the OMP provider prompt was submitted.",
     );
+  }
+
+  async #chatErrorBaseline(page: Page): Promise<{
+    retryCount: number;
+    errorTextCount: number;
+  }> {
+    const retryButtons = page.getByRole("button", {
+      name: /Retry|Try again|다시 시도/i,
+    });
+    const errorText = page.getByText(
+      /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다/i,
+    );
+    return {
+      retryCount: await retryButtons.count().catch(() => 0),
+      errorTextCount: await errorText.count().catch(() => 0),
+    };
+  }
+
+  async #chatErrorState(
+    page: Page,
+    baseline?: { retryCount: number; errorTextCount: number },
+  ): Promise<{
+    message: string;
+    retry?: Locator;
+  } | undefined> {
+    const retryButtons = page.getByRole("button", {
+      name: /Retry|Try again|다시 시도/i,
+    });
+    const errorTexts = page.getByText(
+      /Something went wrong(?:\.|$)|If this issue persists|please contact us through our help center|문제가 발생했습니다|오류가 발생했습니다/i,
+    );
+
+    const retryCount = await retryButtons.count().catch(() => 0);
+    const errorTextCount = await errorTexts.count().catch(() => 0);
+    const hasNewRetry =
+      retryCount > (baseline?.retryCount ?? 0);
+    const hasNewErrorText =
+      errorTextCount > (baseline?.errorTextCount ?? 0);
+
+    if (!hasNewRetry && !hasNewErrorText) return undefined;
+
+    const retry = hasNewRetry
+      ? await firstVisible([retryButtons.nth(retryCount - 1)], 100)
+      : undefined;
+    const errorText = hasNewErrorText
+      ? await firstVisible([errorTexts.nth(errorTextCount - 1)], 100)
+      : undefined;
+
+    if (!retry && !errorText) return undefined;
+
+    const message = (
+      (await errorText?.innerText().catch(() => "")) ||
+      (await retry?.innerText().catch(() => "")) ||
+      "ChatGPT reported an unknown retryable error."
+    ).trim();
+
+    return {
+      message,
+      ...(retry ? { retry } : {}),
+    };
   }
 
   async #stopButton(page: Page): Promise<Locator | undefined> {
@@ -1644,10 +1645,12 @@ export class ChatGptBrowserBackend {
     timeoutMs: number,
     signal?: AbortSignal,
     baselineAssistantTurns = 0,
+    errorBaseline?: { retryCount: number; errorTextCount: number },
   ): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     let lastText = "";
     let stableSince = 0;
+    let retryAttempts = 0;
 
     while (Date.now() < deadline) {
       if (signal?.aborted) {
@@ -1655,6 +1658,22 @@ export class ChatGptBrowserBackend {
           new DOMException("Text-only Web request aborted", "AbortError");
       }
       if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+
+      const errorState = await this.#chatErrorState(page, errorBaseline);
+      if (errorState) {
+        if (retryAttempts < 1 && errorState.retry) {
+          retryAttempts += 1;
+          lastText = "";
+          stableSince = 0;
+          await errorState.retry.click();
+          await sleep(750);
+          continue;
+        }
+        throw new Error(
+          "ChatGPT Web returned an error instead of a valid response: " +
+            errorState.message,
+        );
+      }
 
       const assistantTurns = page.locator(
         '[data-message-author-role="assistant"]',
@@ -1682,6 +1701,13 @@ export class ChatGptBrowserBackend {
         Date.now() - stableSince >= 1_500 &&
         !stop
       ) {
+        const finalErrorState = await this.#chatErrorState(page, errorBaseline);
+        if (finalErrorState) {
+          throw new Error(
+            "ChatGPT Web returned an error instead of a valid response: " +
+              finalErrorState.message,
+          );
+        }
         return lastText;
       }
       await sleep(250);

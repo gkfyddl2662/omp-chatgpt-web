@@ -255,12 +255,15 @@ instruction into the same thread, and returns the summary to OMP. It then
 prepares a fresh replacement Temporary Chat before retiring the compacted tab,
 so the browser never has to close its last tab and relaunch between epochs.
 
-Retained compaction and standalone text-only fallback use the same direct
-composer insertion strategy as ordinary turns
-(ProseMirror -> Lexical -> execCommand -> CDP). A separate text-only Temporary
-Chat is used only when no usable retained browser conversation exists. If that
-transient request owns Chrome's final tab, the tab is retired to `about:blank`
-instead of being closed so the automation browser stays warm.
+Retained compaction uses the same direct composer insertion strategy as
+ordinary turns (ProseMirror -> Lexical -> execCommand -> CDP).
+
+Compaction is **fail-closed**. If the retained ChatGPT conversation is missing,
+unseeded, closed, or returns ChatGPT's error/retry UI, the provider returns an
+error to OMP and refuses to replay the full OMP history into a fresh browser
+tab. OMP therefore keeps the pre-compaction history instead of committing a
+false summary. The provider also rejects error text, maintenance-prompt echoes,
+and large source-prompt replays before a compaction summary can be accepted.
 
 New ordinary turns are serialized behind the compaction boundary so they cannot
 race the summary/reset handoff.
@@ -373,9 +376,10 @@ silently submitting the agent prompt without the connector.
 ## Known limitations
 
 - ChatGPT Web automation depends on current composer and Apps UI structure.
-- If ChatGPT's direct editor internals cannot be discovered safely, insertion
-  falls back to the older contenteditable/CDP paths, which can be much slower
-  for very large prompts.
+- If ChatGPT's direct editor internals cannot be discovered safely, ordinary
+  insertion falls back to the older contenteditable/CDP paths. Compaction does
+  not fall back to a fresh full-history replay when its retained thread is
+  unavailable.
 - Provider token usage is reported as zero because normal ChatGPT Web does not
   expose authoritative request token accounting through this browser path.
 - Only one native OMP tool call is allowed in flight per Web response; multiple
