@@ -320,7 +320,16 @@ export class WebModelProvider {
       this.#broker.end(request);
     } catch (error) {
       this.#broker.end(request);
-      await this.#browser.invalidateSession(conversation).catch(() => undefined);
+
+      // startTurn clears its BrowserTurn for failures that happened before
+      // submission was accepted. Preserve that retained/fresh page so an
+      // outer OMP retry does not close the last tab and relaunch Chrome.
+      // If a real browser turn is still active, its state is ambiguous and
+      // must be invalidated.
+      if (this.#browser.isTurnActive(conversation)) {
+        await this.#browser.invalidateSession(conversation).catch(() => undefined);
+      }
+
       pushError(stream, model, error);
     }
   }
