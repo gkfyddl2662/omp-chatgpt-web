@@ -247,14 +247,14 @@ export class WebModelProvider {
 
           if (this.#browser.hasSession(conversation)) {
             // Never open a second compaction tab while the retained ChatGPT
-            // conversation is still active. Let the foreground browser turn
-            // finish, then compact that exact retained thread.
-            if (this.#browser.isTurnActive(conversation)) {
-              await this.#browser.waitForTurnIdle(conversation, signal);
-            }
-
-            if (this.#browser.hasRetainedConversation(conversation)) {
-              summary = await this.#browser.compactRetainedSession(
+            // conversation is still active. Reserve this conversation epoch,
+            // let the foreground turn finish, compact the same thread, then
+            // reset that same tab before allowing another ordinary turn.
+            if (
+              this.#browser.hasRetainedConversation(conversation) ||
+              this.#browser.isTurnActive(conversation)
+            ) {
+              summary = await this.#browser.compactRetainedSessionWhenIdle(
                 conversation,
                 compileRetainedCompactionPrompt(context),
                 this.#config,
