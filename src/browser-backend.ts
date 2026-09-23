@@ -784,6 +784,9 @@ export class ChatGptBrowserBackend {
         .locator(
           '[data-testid*="attachment" i], ' +
             '[data-testid*="file" i], ' +
+            '[data-testid*="paste" i], ' +
+            '[class*="attachment" i], ' +
+            '[class*="file-preview" i], ' +
             '[aria-label*="pasted text" i], ' +
             '[aria-label*="pasted content" i]',
         )
@@ -1000,8 +1003,24 @@ export class ChatGptBrowserBackend {
             composer,
             attachmentBaseline,
           );
+          await sleep(150);
+
+          const remainingAttachments =
+            await this.#composerAttachmentCount(composer);
+          const afterRemoval = await this.#composerPromptText(composer);
+
+          if (
+            remainingAttachments <= attachmentBaseline &&
+            afterRemoval === before
+          ) {
+            // Rich browser paste was still promoted to an attachment. We
+            // removed it cleanly, so the caller may use the slower inline
+            // compatibility path without risking duplicate prompt content.
+            return undefined;
+          }
+
           throw new Error(
-            'ChatGPT converted the browser-native paste into a "Pasted text" attachment.',
+            'ChatGPT converted the browser-native paste into a "Pasted text" attachment and it could not be rolled back safely.',
           );
         }
 
