@@ -162,7 +162,7 @@ export class ChatGptBrowserBackend {
 
     try {
       await composer.click();
-      await page.keyboard.type(" " + prompt, { delay: 0 });
+      await page.keyboard.insertText(" " + prompt);
       await composer.press("Enter");
       await this.#waitForSubmissionEvidence(page);
     } catch (error) {
@@ -257,22 +257,15 @@ export class ChatGptBrowserBackend {
       page.getByText(connectorName, { exact: true }),
     ], 2_000);
 
-    if (!suggestion) {
-      throw new Error(
-        'ChatGPT app mention "' +
-          connectorName +
-          '" was not offered after typing "@' +
-          mentionQuery +
-          '". Verify that the app is enabled in this workspace and that typing "@' +
-          mentionQuery +
-          '" manually shows "' +
-          connectorName +
-          '".',
-      );
+    if (suggestion) {
+      await suggestion.click();
+    } else {
+      // Current ChatGPT builds can highlight the best @mention suggestion
+      // without exposing a stable option/menuitem node. Match the manual UX:
+      // type "@OMP", then press Enter to accept the highlighted app.
+      await page.keyboard.press("Enter");
     }
-
-    await suggestion.click();
-    await sleep(250);
+    await sleep(300);
 
     // The app mention usually becomes a structured chip/token inside or adjacent
     // to the composer. Verify visible evidence without rewriting the composer.
