@@ -215,15 +215,19 @@ retained browser session exists, compaction:
 
 New ordinary turns wait behind this boundary.
 
-There is no standalone full-history compaction fallback. If the retained
-conversation is unavailable or invalid, the provider returns an error so OMP
-does not commit a destructive compaction from an untrusted response.
+If the retained conversation is unavailable or becomes invalid while the
+compaction waits for the prior turn to settle, the backend switches to a fresh
+Temporary Chat and submits the **self-contained OMP compaction side request**.
+That request carries the exact compaction system instructions and source
+conversation produced by OMP. It is maintenance-only: no connector is attached,
+no OMP tools are exposed, and the ordinary agent turn is not replayed.
 
-Before a retained compaction can succeed, the backend checks ChatGPT's visible
-error/retry UI and validates the returned text. Browser/server error text,
-maintenance-prompt echoes, and large source-prompt replays are rejected.
-ChatGPT's Retry action may be attempted once on the same submitted compaction;
-if it still fails, the compaction fails.
+Before either retained or fresh compaction can succeed, the backend checks
+ChatGPT's visible error/retry UI and validates the returned text.
+Browser/server error text, maintenance-prompt echoes, and large source-prompt
+replays are rejected. ChatGPT's Retry action may be attempted once on the same
+submitted compaction because the side request has no tool side effects; if it
+still fails, the compaction fails.
 
 Page retirement remains last-tab safe: when a stale page is Chrome's only
 remaining page, the backend navigates it to `about:blank` rather than closing
@@ -323,8 +327,9 @@ Completions API as an inference fallback.
 
 - ChatGPT composer and Apps selectors can change without notice.
 - If direct ProseMirror/Lexical discovery fails, ordinary insertion falls back
-  to older contenteditable/CDP paths. Retained compaction fails closed rather
-  than replaying the full history in a fresh tab.
+  to older contenteditable/CDP paths. Compaction may use a fresh maintenance-only
+  side request when retained history is unavailable; ordinary agent-turn replay
+  remains prohibited.
 - ChatGPT Web does not expose authoritative token accounting through this
   browser route, so provider usage remains zero.
 - The provider is text-only.
