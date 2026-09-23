@@ -299,8 +299,7 @@ Start with:
 - active turns and pending compactions
 - shared root/subagent Web session count
 - current root-session subagent usage and hard limit
-- latest prompt preparation timings, including insertion mode (`execCommand`,
-  `hidden-exec`, or CDP fallback)
+- latest prompt preparation timings
 
 If OMP reports that `tunnel-client` cannot be found after a restart, persist
 its full executable path with `/web-config tunnel-bin ...`.
@@ -323,12 +322,8 @@ silently submitting the agent prompt without the connector.
 ## Known limitations
 
 - ChatGPT Web automation depends on current composer and Apps UI structure.
-- Large inline prompts use an experimental paint-suppressed
-  `hidden-exec` path at 16,384 characters and above. It keeps the composer
-  live while temporarily setting its wrapper to `content-visibility: hidden`
-  during the synchronous edit, then restores the original inline styles before
-  verification/submission. If the edit is rejected, the existing CDP
-  `insertText` fallback is used.
+- Large inline continuation prompts can still be slower to inject into a long
+  retained ChatGPT page than manual user paste.
 - Provider token usage is reported as zero because normal ChatGPT Web does not
   expose authoritative request token accounting through this browser path.
 - Only one native OMP tool call is allowed in flight per Web response; multiple
