@@ -1,19 +1,311 @@
 # omp-chatgpt-web
 
-Use **normal ChatGPT Web chat** as the model backend for **Oh My Pi**, while keeping OMP as the local agent harness and using **native ChatGPT MCP tool calls** over OpenAI's Secure MCP Tunnel.
+Use normal **ChatGPT Web** as an **Oh My Pi (OMP) model provider**, while OMP
+remains the local agent loop, session owner, approval authority, and tool
+runtime.
 
-> Early development. The project is intentionally fail-closed: no Codex, ChatGPT Work, or OpenAI API model-inference fallback is allowed.
+> Status: **beta**. The core provider, retained ChatGPT sessions, native OMP
+> tool bridge, compaction handoff, and OMP task/subagent routing are
+> implemented. Real-account browser automation still depends on the current
+> ChatGPT UI and should be treated as integration-sensitive.
 
-## Project invariants
+## What this project does
 
-- **Inference:** normal ChatGPT Web chat only
-- **Harness:** Oh My Pi
-- **Tool calling:** ChatGPT native MCP only
-- **MCP transport:** OpenAI Secure MCP Tunnel
-- **Local execution:** OMP tool/runtime pipeline
-- **Codex:** forbidden
-- **ChatGPT Work:** forbidden
-- **OpenAI API model inference:** forbidden
-- **Fallback:** none
+When `chatgpt-web/web` is selected, OMP sends its model turn to a normal
+`chatgpt.com` Temporary Chat. ChatGPT can call the custom **OMP Local** MCP
+connector, and those calls are translated back into ordinary OMP `ToolCall`
+events.
 
-See `docs/architecture.md` once the bootstrap branch lands.
+```text
+OMP session / Goal / task agent
+          |
+          | provider request
+          v
+   chatgpt-web/web
+          |
+          v
+    ChatGPT Web
+          |
+          | native MCP
+          v
+      OMP Local
+          |
+          | Secure MCP Tunnel
+          v
+  shared local MCP bridge
+   - omp_tool_inventory
+   - omp_tool_call
+   - omp_turn_complete
+          |
+          v
+     OMP ToolCall
+          |
+          v
+OMP validation / approval / execution
+          |
+          +---- ToolResult ----> same ChatGPT response
+```
+
+There is no outer Codex/Work model deciding whether to invoke ChatGPT Web.
+ChatGPT Web is the selected OMP provider.
+
+## Requirements
+
+- Oh My Pi 18.2.x or newer
+- Node.js 22.19 or newer
+- Chrome, Chromium, or Brave
+- a ChatGPT account that can use custom MCP apps/connectors
+- OpenAI Secure MCP Tunnel `tunnel-client`
+- a configured Tunnel-backed ChatGPT connector, normally named `OMP Local`
+
+The provider is intentionally text-only. Image input and snapcompact transport
+are outside its current scope.
+
+## Install
+
+Install directly from the repository:
+
+```text
+omp install github:gkfyddl2662/omp-chatgpt-web --force
+```
+
+Restart OMP after installing or upgrading the extension.
+
+## Setup
+
+### 1. Configure the Secure MCP Tunnel
+
+Inside OMP:
+
+```text
+/web-config tunnel tunnel_...
+/web-config api sk-...
+```
+
+The values are persisted outside the plugin install directory in:
+
+```text
+~/.omp/chatgpt-web/config.json
+```
+
+If `tunnel-client` is not visible to the OMP process on Windows, locate it in
+PowerShell:
+
+```powershell
+(Get-Command tunnel-client -ErrorAction Stop).Source
+```
+
+Then persist the full path:
+
+```text
+/web-config tunnel-bin C:\full\path\to\tunnel-client.exe
+```
+
+The extension also probes common Go, Scoop, WinGet, Chocolatey, and
+`~/.local/bin` locations before falling back to `PATH`.
+
+Start the tunnel:
+
+```text
+/web-tunnel start
+```
+
+### 2. Create the ChatGPT connector
+
+In ChatGPT Developer Mode, create a Tunnel-backed MCP connector named exactly:
+
+```text
+OMP Local
+```
+
+A different exact name can be persisted with:
+
+```text
+/web-config connector My OMP
+```
+
+### 3. Sign in with the dedicated browser profile
+
+Run:
+
+```text
+/web-open
+```
+
+This opens ordinary Chrome with the dedicated profile and **without** remote
+debugging or Playwright launch flags. Sign in to ChatGPT, verify the connector
+is available, then close that Chrome window completely.
+
+On the first Web-provider turn the extension reopens the same profile with a
+local DevTools port and attaches Playwright over CDP.
+
+### 4. Select the provider
+
+```text
+/web-use
+```
+
+or use OMP's normal model selector:
+
+```text
+/model chatgpt-web/web
+```
+
+After that, ordinary OMP prompts, Goals, and task agents use ChatGPT Web for
+model inference.
+
+## Retained ChatGPT sessions
+
+Each OMP provider session owns one live ChatGPT **Temporary Chat** tab.
+
+```text
+first turn    -> full OMP context seed
+later turns   -> same ChatGPT thread + OMP continuation delta
+compact       -> same retained thread
+summary       -> returned to OMP
+after compact -> same tab reset to a fresh Temporary Chat
+next turn     -> seeds OMP's compacted context
+```
+
+Temporary Chat is intentional. The backend does not reload or rehydrate a
+retained thread between turns because there is no durable conversation URL to
+reconstruct safely.
+
+The prompt contract itself is preserved between turns; performance work is
+limited to browser transport and retained-session behavior.
+
+## Task agents and subagents
+
+When the current parent model is `chatgpt-web/web`, the extension's
+`before_subagent_spawn` hook routes OMP task/eval subagents through the same
+provider as well.
+
+The process-level runtime is shared, while browser pages remain session-local:
+
+```text
+root OMP session ---------> Temporary Chat tab A
+task/scout subagent ------> Temporary Chat tab B
+review subagent ----------> Temporary Chat tab C
+                               |
+                               v
+                     shared BrowserBackend
+                     shared TurnBroker
+                     shared MCP :8791
+                     shared Secure MCP Tunnel
+```
+
+The MCP bridge multiplexes concurrent parent/child turns by opaque
+`turn_token`. A child session releases only its own browser conversation and
+turn state when it exits.
+
+## Tool bridge
+
+ChatGPT sees a fixed MCP ABI instead of a permanently expanded schema for every
+possible OMP tool:
+
+- `omp_tool_inventory(turn_token, ...)` — returns the exact tool catalog and
+  schemas active for this OMP turn.
+- `omp_tool_call(turn_token, name, arguments)` — asks OMP to emit and execute
+  one ordinary native tool call.
+- `omp_turn_complete(turn_token, answer)` — completes the current OMP model
+  turn with final assistant text.
+
+This keeps OMP authoritative for validation, approvals, Goal state, session
+persistence, extension tools, LSP tools, and other runtime behavior.
+
+## Compaction
+
+OMP still decides when context compaction is required.
+
+If a retained ChatGPT thread exists, compaction reserves that thread, waits for
+its previous response to **physically settle**, sends the retained-compaction
+instruction into the same thread, returns the summary to OMP, then resets that
+same tab to a fresh Temporary Chat.
+
+A separate text-only Temporary Chat is used only as a fallback when no usable
+retained browser conversation exists.
+
+New ordinary turns are serialized behind the compaction boundary so they cannot
+race the summary/reset handoff.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `/web-open` | Open the dedicated browser profile for manual ChatGPT sign-in |
+| `/web-use` | Switch the current OMP session to `chatgpt-web/web` |
+| `/web-status` | Show browser, MCP, tunnel, retained-session, and preparation diagnostics |
+| `/web-tunnel start\|stop\|status` | Manage the Secure MCP Tunnel |
+| `/web-config show` | Show persisted provider configuration |
+| `/web-config tunnel <id>` | Persist the tunnel ID |
+| `/web-config api <key>` | Persist the tunnel runtime API key |
+| `/web-config tunnel-bin <path>` | Persist an explicit `tunnel-client` executable |
+| `/web-config connector <name>` | Persist the exact ChatGPT connector name |
+| `/web-config browser <path>` | Persist an explicit browser executable |
+| `/web-config cdp <port>` | Persist the local Chrome DevTools port |
+
+## Diagnostics
+
+Start with:
+
+```text
+/web-status
+/web-tunnel status
+```
+
+`/web-status` includes:
+
+- MCP endpoint
+- tunnel state
+- Chrome/CDP attachment state
+- number of tabs and retained Web sessions
+- active turns and pending compactions
+- shared root/subagent Web session count
+- latest prompt preparation timings
+
+If OMP reports that `tunnel-client` cannot be found after a restart, persist
+its full executable path with `/web-config tunnel-bin ...`.
+
+If ChatGPT fails to attach **OMP Local**, the provider fails closed instead of
+silently submitting the agent prompt without the connector.
+
+## Security and execution boundary
+
+- ChatGPT authentication stays in the dedicated local browser profile.
+- The local MCP server binds to loopback.
+- The Web model receives only the fixed MCP bridge contract.
+- Every MCP tool call is scoped by a turn token and the tool set OMP exposed for
+  that specific turn.
+- `omp_tool_call` does not directly execute filesystem or shell actions; OMP
+  remains the execution and approval authority.
+- The provider does not use Codex, ChatGPT Work, Responses API, or Chat
+  Completions API as an inference fallback.
+
+## Known limitations
+
+- ChatGPT Web automation depends on current composer and Apps UI structure.
+- Large inline continuation prompts can still be slower to inject into a long
+  retained ChatGPT page than manual user paste.
+- Provider token usage is reported as zero because normal ChatGPT Web does not
+  expose authoritative request token accounting through this browser path.
+- Only one native OMP tool call is allowed in flight per Web response; multiple
+  sequential tool rounds are supported.
+- Image input and snapcompact transport are not implemented.
+- Real-account browser + Secure MCP Tunnel behavior cannot be fully covered by
+  headless unit tests.
+
+## Development
+
+```sh
+npm ci
+npm run check
+```
+
+The check target runs TypeScript type checking and the Node test suite.
+
+See [docs/architecture.md](docs/architecture.md) for the runtime ownership and
+turn lifecycle in more detail.
+
+## License
+
+MIT
