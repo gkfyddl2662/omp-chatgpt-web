@@ -30,13 +30,12 @@ async function firstVisible(
 interface BrowserTurn {
   page: Page;
   approvalTimer?: ReturnType<typeof setInterval>;
+  settling?: Promise<void>;
 }
 
 interface BrowserSession {
   page: Page;
   seeded: boolean;
-  resetAfterTurn: boolean;
-  lastUsedAt: number;
 }
 
 interface BrowserPreparationTiming {
@@ -286,7 +285,6 @@ export class ChatGptBrowserBackend {
       !existing.page.isClosed() &&
       this.#browser?.isConnected()
     ) {
-      existing.lastUsedAt = Date.now();
       return existing;
     }
 
@@ -295,8 +293,6 @@ export class ChatGptBrowserBackend {
     const session: BrowserSession = {
       page,
       seeded: false,
-      resetAfterTurn: false,
-      lastUsedAt: Date.now(),
     };
     this.#sessions.set(sessionKey, session);
     this.#reservedPages.delete(page);
@@ -319,7 +315,6 @@ export class ChatGptBrowserBackend {
     return Boolean(
       session &&
         session.seeded &&
-        !session.resetAfterTurn &&
         !session.page.isClosed() &&
         this.#browser?.isConnected(),
     );
@@ -342,7 +337,6 @@ export class ChatGptBrowserBackend {
     activeTurns: number;
     pendingCompactions: number;
     lastPreparation?: BrowserPreparationTiming;
-    urls: string[];
   }> {
     this.#pruneClosedSessions();
     const open = config
@@ -355,10 +349,9 @@ export class ChatGptBrowserBackend {
       retainedSessions: this.#sessions.size,
       activeTurns: this.#turns.size,
       pendingCompactions: this.#compactionBarriers.size,
-      ...(this.#lastPreparation ? { lastPreparation: { ...this.#lastPreparation } } : {}),
-      urls: [...this.#sessions.values()]
-        .filter(session => !session.page.isClosed())
-        .map(session => session.page.url()),
+      ...(this.#lastPreparation
+        ? { lastPreparation: { ...this.#lastPreparation } }
+        : {}),
     };
   }
 
@@ -411,6 +404,7 @@ export class ChatGptBrowserBackend {
     config: RuntimeConfig,
   ): Promise<void> {
     await this.#waitForCompactionBarrier(sessionKey);
+    await this.waitForTurnIdle(sessionKey);
 
     if (this.#turns.has(sessionKey)) {
       throw new Error(
@@ -420,26 +414,26 @@ export class ChatGptBrowserBackend {
 
     const preparationStartedAt = Date.now();
     const session = await this.#session(sessionKey, config);
-    if (session.resetAfterTurn) {
-      await this.#resetSessionPage(sessionKey, config);
-    }
     const sessionReadyAt = Date.now();
 
-    // OMP ChatGPT Web intentionally keeps retained work on Temporary Chat.
-    // Do not reload/rehydrate the page between turns: a temporary conversation
-    // has no durable /c/<id> URL whose history can be safely reconstructed.
+    // Retained work stays on the live Temporary Chat page. Temporary Chat has
+    // no durable conversation URL, so the backend never reloads it between
+    // ordinary turns.
     const page = session.page;
-    let composer: Locator;
+    let composer: Locator | undefined;
     try {
-      composer = await this.#requireComposer(page);
+      const initialComposer = await this.#requireComposer(page);
       composer = await this.#mentionConnector(
         page,
-        composer,
+        initialComposer,
         config.connectorName,
       );
     } catch (error) {
       await this.#recoverUnsubmittedTurn(sessionKey, composer);
       throw error;
+    }
+    if (!composer) {
+      throw new Error("ChatGPT composer was unavailable after connector selection.");
     }
     const mentionReadyAt = Date.now();
 
@@ -492,7 +486,6 @@ export class ChatGptBrowserBackend {
         submitMs: submittedAt - insertedAt,
       };
       session.seeded = true;
-      session.lastUsedAt = Date.now();
     } catch (error) {
       // After Enter, submission state is ambiguous. A retry must not append to
       // a possibly-submitted retained thread, so invalidate only this case.
@@ -504,42 +497,40 @@ export class ChatGptBrowserBackend {
   async finishTurn(
     sessionKey: string,
     config: RuntimeConfig,
-    signal?: AbortSignal,
+    _signal?: AbortSignal,
   ): Promise<void> {
     const turn = this.#turns.get(sessionKey);
-    const session = this.#sessions.get(sessionKey);
+    if (!turn) return;
 
-    if (turn && !turn.page.isClosed()) {
-      await this.#waitUntilIdle(turn.page, Math.min(config.turnTimeoutMs, 15_000), signal)
-        .catch(() => undefined);
+    if (turn.approvalTimer) {
+      clearInterval(turn.approvalTimer);
+      turn.approvalTimer = undefined;
     }
 
-    if (turn?.approvalTimer) clearInterval(turn.approvalTimer);
-    this.#turns.delete(sessionKey);
-
-    if (session) {
-      session.lastUsedAt = Date.now();
-      if (session.resetAfterTurn) {
-        await this.#resetSessionPage(sessionKey, config);
-      }
-    }
-  }
-
-  async markResetAfterTurn(sessionKey: string): Promise<void> {
-    const session = this.#sessions.get(sessionKey);
-    if (session) session.resetAfterTurn = true;
-  }
-
-  async resetSession(
-    sessionKey: string,
-    config: RuntimeConfig,
-  ): Promise<void> {
-    if (this.#turns.has(sessionKey)) {
-      const session = this.#sessions.get(sessionKey);
-      if (session) session.resetAfterTurn = true;
+    if (turn.page.isClosed()) {
+      this.#turns.delete(sessionKey);
       return;
     }
-    await this.#resetSessionPage(sessionKey, config);
+
+    // Logical completion (omp_turn_complete) can arrive a little before the
+    // ChatGPT UI physically stops generating. Keep the turn owned until the
+    // stop button has actually disappeared, but do that in the background so
+    // OMP can receive the final answer immediately. The next ordinary turn and
+    // retained compaction both wait on #turns, so neither can race this tail.
+    if (!turn.settling) {
+      turn.settling = this.#waitUntilIdle(
+        turn.page,
+        config.turnTimeoutMs,
+      )
+        .catch(async () => {
+          await this.invalidateSession(sessionKey);
+        })
+        .finally(() => {
+          if (this.#turns.get(sessionKey) === turn) {
+            this.#turns.delete(sessionKey);
+          }
+        });
+    }
   }
 
   async #resetSessionPage(
@@ -557,8 +548,6 @@ export class ChatGptBrowserBackend {
     try {
       await this.#navigateFreshChat(session.page, config);
       session.seeded = false;
-      session.resetAfterTurn = false;
-      session.lastUsedAt = Date.now();
     } catch {
       await this.invalidateSession(sessionKey);
     }
@@ -707,13 +696,6 @@ export class ChatGptBrowserBackend {
       this.#reservedPages.delete(page);
       await page.close().catch(() => undefined);
     }
-  }
-
-  async releaseTurn(sessionKey: string): Promise<void> {
-    const turn = this.#turns.get(sessionKey);
-    if (!turn) return;
-    this.#turns.delete(sessionKey);
-    if (turn.approvalTimer) clearInterval(turn.approvalTimer);
   }
 
   async invalidateSession(sessionKey: string): Promise<void> {
@@ -1129,6 +1111,10 @@ export class ChatGptBrowserBackend {
       }
       await sleep(200);
     }
+
+    throw new Error(
+      "ChatGPT turn did not physically settle within " + timeoutMs + "ms.",
+    );
   }
 
   async #waitForAssistantText(
