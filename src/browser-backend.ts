@@ -464,7 +464,11 @@ export class ChatGptBrowserBackend {
     let composer: Locator;
     try {
       composer = await this.#requireComposer(page);
-      await this.#mentionConnector(page, composer, config.connectorName);
+      composer = await this.#mentionConnector(
+        page,
+        composer,
+        config.connectorName,
+      );
     } catch (error) {
       await this.#recoverUnsubmittedTurn(sessionKey, composer);
       throw error;
@@ -973,104 +977,146 @@ export class ChatGptBrowserBackend {
     ).catch(() => false);
   }
 
+  async #selectedConnectorIsExact(
+    composer: Locator,
+    connectorName: string,
+  ): Promise<boolean> {
+    const selected = composer
+      .locator('[data-id^="plugin:"][data-keyword]')
+      .filter({ visible: true });
+
+    const keywords = await selected
+      .evaluateAll(elements =>
+        elements.map(element => element.getAttribute("data-keyword")),
+      )
+      .catch(() => [] as Array<string | null>);
+
+    const exact = keywords.filter(keyword => keyword === connectorName).length;
+    if (exact > 1) {
+      throw new Error(
+        'ChatGPT composer exposed duplicate connector selections for "' +
+          connectorName +
+          '".',
+      );
+    }
+    return exact === 1;
+  }
+
   async #mentionConnector(
     page: Page,
     composer: Locator,
     connectorName: string,
-  ): Promise<void> {
+  ): Promise<Locator> {
+    // A retained/fresh surface may already expose the selected connector.
+    if (await this.#selectedConnectorIsExact(composer, connectorName)) {
+      return composer;
+    }
+
     const mentionQuery =
       connectorName.trim().split(/\s+/)[0] || connectorName;
 
+    await composer.fill("");
+    await composer.focus();
     await composer.fill("@" + mentionQuery);
 
     const currentMentionText = (
-      (await composer.innerText().catch(() => "")) ||
+      (await composer.textContent().catch(() => "")) ||
       (await composer.inputValue().catch(() => ""))
     ).trim();
 
     if (currentMentionText !== "@" + mentionQuery) {
-      await composer.fill("");
-      await composer.fill("@" + mentionQuery);
-    }
-
-    // Do not click connector labels: ChatGPT can render the attached app name
-    // as an inline plugin-detail link. Instead, as soon as the visible
-    // @mention suggestion text appears anywhere outside the composer/plugin
-    // pill, accept the highlighted suggestion with Enter.
-    const mentionDeadline = Date.now() + 12_000;
-    let detected = false;
-
-    while (Date.now() < mentionDeadline) {
-      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
-
-      if (await this.#mentionSuggestionVisible(page, composer, connectorName)) {
-        detected = true;
-        break;
-      }
-
-      const mentionText = (
-        (await composer.innerText().catch(() => "")) ||
-        (await composer.inputValue().catch(() => ""))
-      ).trim();
-
-      if (mentionText !== "@" + mentionQuery) {
-        throw new Error(
-          'ChatGPT @mention query changed while waiting for "' +
-            connectorName +
-            '": "' +
-            mentionText +
-            '"',
-        );
-      }
-
-      // Poll quickly so Enter lands almost immediately after the popup appears.
-      await sleep(50);
-    }
-
-    if (!detected) {
       throw new Error(
-        'ChatGPT did not visibly offer "' +
-          connectorName +
-          '" within 12 seconds after typing "@' +
+        'ChatGPT did not preserve the @mention query "@' +
           mentionQuery +
           '".',
       );
     }
 
-    await composer.press("Enter");
-    await sleep(250);
+    // Current ChatGPT connector menus expose keyboard-owned menu rows with
+    // tabindex=0. Prove the exact OMP Local row, then ensure that exact row is
+    // highlighted before pressing Enter. Merely seeing the label is not enough.
+    const menuRows = page
+      .locator('.__menu-item[tabindex="0"]')
+      .filter({ visible: true });
+    const exactRow = menuRows.filter({
+      has: page.getByText(connectorName, { exact: true }),
+    });
 
-    const composerContainer = composer.locator(
-      "xpath=ancestor::*[self::form or @data-type='unified-composer'][1]",
-    );
-    const mentioned = await firstVisible(
-      [
-        composerContainer.getByText(connectorName, { exact: true }),
-        page
-          .locator(
-            '[data-mention], [data-app-id], [data-testid*="mention"]',
-          )
-          .filter({ hasText: connectorName }),
-      ],
-      1_000,
-    );
+    const deadline = Date.now() + 12_000;
+    let exactVisible = false;
+    while (Date.now() < deadline) {
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
 
-    if (!mentioned) {
-      const currentText = (
-        await composer.innerText().catch(() => "")
-      ).trim();
-      const currentValue = (
-        await composer.inputValue().catch(() => "")
-      ).trim();
-      const plain = currentText || currentValue;
-      if (plain === "@" + mentionQuery) {
+      const count = await exactRow.count().catch(() => 0);
+      if (count === 1 && await exactRow.first().isVisible().catch(() => false)) {
+        exactVisible = true;
+        break;
+      }
+      if (count > 1) {
         throw new Error(
-          'ChatGPT app "' +
+          'ChatGPT exposed multiple exact @mention rows for "' +
             connectorName +
-            '" suggestion was accepted but the mention did not attach to the composer.',
+            '".',
         );
       }
+
+      await sleep(50);
     }
+
+    if (!exactVisible) {
+      throw new Error(
+        'ChatGPT did not expose one exact @mention menu row for "' +
+          connectorName +
+          '" within 12 seconds.',
+      );
+    }
+
+    const row = exactRow.first();
+    const highlighted = async (): Promise<boolean> =>
+      (await row.getAttribute("data-highlighted").catch(() => null)) !== null;
+
+    if (!(await highlighted())) {
+      const visibleRows = await menuRows.count().catch(() => 0);
+      for (
+        let step = 0;
+        step < Math.max(1, visibleRows) && !(await highlighted());
+        step += 1
+      ) {
+        await composer.press("ArrowDown");
+        await sleep(25);
+      }
+    }
+
+    if (!(await highlighted())) {
+      throw new Error(
+        'ChatGPT @mention menu could not highlight "' +
+          connectorName +
+          '".',
+      );
+    }
+
+    await composer.press("Enter");
+
+    // Connector selection can replace the Lexical composer subtree. Resolve
+    // the active composer again, then fail closed unless the exact app pill is
+    // present. This prevents a first turn from silently proceeding unbound.
+    const selectedComposer = await this.#requireComposer(page);
+    const selectionDeadline = Date.now() + 5_000;
+    while (Date.now() < selectionDeadline) {
+      if (await this.#selectedConnectorIsExact(
+        selectedComposer,
+        connectorName,
+      )) {
+        return selectedComposer;
+      }
+      await sleep(50);
+    }
+
+    throw new Error(
+      'ChatGPT did not attach the exact connector "' +
+        connectorName +
+        '" after accepting the @mention.',
+    );
   }
 
   async #assertNoConnectorSelected(
