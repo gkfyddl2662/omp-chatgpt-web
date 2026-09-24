@@ -166,8 +166,13 @@ A following ordinary turn and retained compaction both wait for this physical
 ownership to clear, preventing a new request from racing the previous browser
 response.
 
-If physical settlement never occurs before the configured turn timeout, the
-browser session is invalidated instead of being reused in an ambiguous state.
+If physical settlement never occurs after a logical
+`omp_turn_complete`, the session is invalidated because the completion state is
+ambiguous. A different case applies when ChatGPT itself shows a terminal
+error/retry surface before OMP completion: the provider suppresses replay of the
+agent turn but preserves the live retained page for context maintenance. The
+next compaction snapshots that pre-existing error UI as baseline and sends the
+COMPACT request into the same thread first.
 
 ## Retained conversation model
 
