@@ -18,6 +18,7 @@ import {
   compileRetainedCompactionPrompt,
 } from "./compaction.js";
 import {
+  ChatGptPromptNotSubmittedError,
   ChatGptReplayUnsafeTurnError,
   type ChatGptBrowserBackend,
 } from "./browser-backend.js";
@@ -107,12 +108,14 @@ function pushText(stream: AssistantMessageEventStream, model: Model, text: strin
 }
 
 function pushError(stream: AssistantMessageEventStream, model: Model, error: unknown): void {
-  const replaySuppressed = error instanceof ChatGptReplayUnsafeTurnError;
+  const silentRecovery =
+    error instanceof ChatGptReplayUnsafeTurnError ||
+    error instanceof ChatGptPromptNotSubmittedError;
   const message = error instanceof Error ? error.message : String(error);
   const assistant: AssistantMessage = {
     ...baseMessage(model, "error"),
     errorMessage: message,
-    ...(replaySuppressed
+    ...(silentRecovery
       ? { errorId: AIError.create(AIError.Flag.SilentAbort) }
       : {}),
   };
