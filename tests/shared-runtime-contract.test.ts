@@ -266,3 +266,41 @@ test("shared composer submit helper clicks Send only after Enter leaves a verifi
   assert.match(block, /beforeFallbackSend/);
   assert.match(block, /#clearUnsubmittedPromptDraft/);
 });
+
+
+test("connector readiness retries capability probes for up to 180 seconds", () => {
+  const start = browserSource.indexOf("async #mentionConnector(");
+  const end = browserSource.indexOf("async #composerContainsPrompt(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /readinessDeadline = Date\.now\(\) \+ 180_000/);
+  assert.match(block, /probeWindowMs = 2_000/);
+  assert.match(block, /retryDelayMs = 400/);
+  assert.match(block, /attachWindowMs = 10_000/);
+  assert.match(block, /await activeComposer\.fill\(mentionText\)/);
+  assert.match(block, /await activeComposer\.fill\(""\)/);
+  assert.match(block, /activeComposer = await this\.#requireComposer\(page\)/);
+  assert.match(block, /within 180 seconds/);
+  assert.doesNotMatch(block, /Date\.now\(\) \+ 12_000/);
+});
+
+test("connector readiness never clears a connector that attached late", () => {
+  const start = browserSource.indexOf("async #mentionConnector(");
+  const end = browserSource.indexOf("async #composerContainsPrompt(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  const lateAttachComment = block.indexOf("selection did not stick");
+  const lateExactCheck = block.indexOf(
+    "await this.#selectedConnectorIsExact(",
+    lateAttachComment,
+  );
+  const nextClear = block.indexOf(
+    'await activeComposer.fill("").catch(() => undefined)',
+    lateAttachComment,
+  );
+  assert.ok(lateAttachComment >= 0);
+  assert.ok(lateExactCheck > lateAttachComment);
+  assert.ok(nextClear > lateExactCheck);
+});
