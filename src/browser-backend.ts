@@ -53,10 +53,10 @@ export class ChatGptReplayUnsafeTurnError extends Error {
   }
 }
 
-class ChatGptMaintenanceNotSubmittedError extends Error {
+export class ChatGptPromptNotSubmittedError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "ChatGptMaintenanceNotSubmittedError";
+    this.name = "ChatGptPromptNotSubmittedError";
   }
 }
 
@@ -603,8 +603,29 @@ export class ChatGptBrowserBackend {
     }
 
     try {
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      const submittedPrompt = " " + prompt;
+      await this.#submitComposerPrompt(
+        page,
+        composer,
+        submittedPrompt,
+        baselineUsers,
+        {
+          beforeFallbackSend: async activeComposer => {
+            if (
+              !(await this.#selectedConnectorIsExact(
+                activeComposer,
+                config.connectorName,
+              ))
+            ) {
+              throw new ChatGptPromptNotSubmittedError(
+                'ChatGPT lost the exact connector "' +
+                  config.connectorName +
+                  '" before fallback Send; the prompt was not submitted.',
+              );
+            }
+          },
+        },
+      );
       const submittedAt = Date.now();
       this.#lastPreparation = {
         kind: "turn",
@@ -620,8 +641,20 @@ export class ChatGptBrowserBackend {
       };
       session.seeded = true;
     } catch (error) {
-      // After Enter, submission state is ambiguous. A retry must not append to
-      // a possibly-submitted retained thread, so invalidate only this case.
+      if (error instanceof ChatGptPromptNotSubmittedError) {
+        // The verified prompt is still only a draft. Release BrowserTurn
+        // ownership and clear the draft, but keep the page/session so an
+        // active Goal can silently continue without an about:blank detour.
+        const activeComposer = await this.#composer(page);
+        await this.#recoverUnsubmittedTurn(
+          sessionKey,
+          activeComposer ?? composer,
+        );
+        throw error;
+      }
+
+      // The composer cleared without submission evidence, so delivery is
+      // ambiguous. Do not append/retry on this possibly-submitted thread.
       await this.invalidateSession(sessionKey);
       throw error;
     }
@@ -877,12 +910,12 @@ export class ChatGptBrowserBackend {
       );
       const insertedAt = Date.now();
 
-      await this.#submitMaintenancePrompt(
+      await this.#submitComposerPrompt(
         page,
         composer,
         prompt,
         baselineUsers,
-        signal,
+        { signal },
       );
       const submittedAt = Date.now();
       this.#lastPreparation = {
@@ -916,7 +949,7 @@ export class ChatGptBrowserBackend {
       await this.#resetSessionPage(sessionKey, config);
       return summary;
     } catch (error) {
-      if (error instanceof ChatGptMaintenanceNotSubmittedError) {
+      if (error instanceof ChatGptPromptNotSubmittedError) {
         // The draft never left the composer. Preserve the retained history so
         // OMP can advance to shake/another maintenance method and retry handoff
         // later without forcing a new full-history browser seed.
@@ -988,12 +1021,12 @@ export class ChatGptBrowserBackend {
       );
       const insertedAt = Date.now();
 
-      await this.#submitMaintenancePrompt(
+      await this.#submitComposerPrompt(
         page,
         composer,
         prompt,
         baselineUsers,
-        signal,
+        { signal },
       );
       const submittedAt = Date.now();
       this.#lastPreparation = {
@@ -1761,7 +1794,7 @@ export class ChatGptBrowserBackend {
     return this.#verifyComposerInsertion("", actual, prompt);
   }
 
-  async #clearUnsubmittedMaintenanceDraft(
+  async #clearUnsubmittedPromptDraft(
     page: Page,
     prompt: string,
   ): Promise<boolean> {
@@ -1807,18 +1840,22 @@ export class ChatGptBrowserBackend {
     return false;
   }
 
-  async #submitMaintenancePrompt(
+  async #submitComposerPrompt(
     page: Page,
     composer: Locator,
     prompt: string,
     baselineUserTurns: number,
-    signal?: AbortSignal,
+    options?: {
+      signal?: AbortSignal;
+      beforeFallbackSend?: (activeComposer: Locator) => Promise<void>;
+    },
   ): Promise<void> {
+    const signal = options?.signal;
     const abortIfNeeded = async (): Promise<void> => {
       if (!signal?.aborted) return;
-      if (await this.#clearUnsubmittedMaintenanceDraft(page, prompt)) {
-        throw new ChatGptMaintenanceNotSubmittedError(
-          "OMP maintenance was cancelled before the ChatGPT prompt was submitted; the retained thread was preserved.",
+      if (await this.#clearUnsubmittedPromptDraft(page, prompt)) {
+        throw new ChatGptPromptNotSubmittedError(
+          "OMP provider prompt submission was cancelled before ChatGPT accepted it; the browser thread was preserved.",
         );
       }
       throw signal.reason ??
@@ -1862,8 +1899,12 @@ export class ChatGptBrowserBackend {
       }
       await abortIfNeeded();
       throw new Error(
-        "ChatGPT cleared the maintenance draft but did not show submission evidence.",
+        "ChatGPT cleared the provider prompt draft but did not show submission evidence.",
       );
+    }
+
+    if (active) {
+      await options?.beforeFallbackSend?.(active);
     }
 
     const send = await this.#sendButton(page);
@@ -1883,14 +1924,14 @@ export class ChatGptBrowserBackend {
 
     await abortIfNeeded();
 
-    if (await this.#clearUnsubmittedMaintenanceDraft(page, prompt)) {
-      throw new ChatGptMaintenanceNotSubmittedError(
-        "ChatGPT did not submit the OMP maintenance prompt with Enter or the Send button; the retained thread was preserved.",
+    if (await this.#clearUnsubmittedPromptDraft(page, prompt)) {
+      throw new ChatGptPromptNotSubmittedError(
+        "ChatGPT did not submit the OMP provider prompt with Enter or the Send button; the browser thread was preserved.",
       );
     }
 
     throw new Error(
-      "ChatGPT maintenance submission became ambiguous after the composer draft disappeared.",
+      "ChatGPT provider prompt submission became ambiguous after the composer draft disappeared.",
     );
   }
 
@@ -1949,24 +1990,6 @@ export class ChatGptBrowserBackend {
           '" connector attached.',
       );
     }
-  }
-
-  async #waitForSubmissionEvidence(
-    page: Page,
-    baselineUserTurns = 0,
-  ): Promise<void> {
-    if (
-      await this.#waitForSubmissionEvidenceFor(
-        page,
-        baselineUserTurns,
-        12_000,
-      )
-    ) {
-      return;
-    }
-    throw new Error(
-      "ChatGPT Web did not show evidence that the OMP provider prompt was submitted.",
-    );
   }
 
   async #chatErrorBaseline(page: Page): Promise<ChatErrorBaseline> {

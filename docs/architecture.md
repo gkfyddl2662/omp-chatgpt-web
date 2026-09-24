@@ -309,14 +309,18 @@ falling back to `PATH`.
 
 ## Failure policy
 
-The provider fails closed around connector and submission state.
+The provider fails closed around connector and submission state. Both ordinary
+agent prompts and maintenance prompts use guarded Enter -> submission-evidence
+-> Send-button fallback. Ordinary fallback Send revalidates the exact OMP Local
+connector immediately before clicking.
 
 Examples:
 
 - no exact connector row -> no prompt submission
 - no exact selected connector pill -> no prompt submission
 - failed prompt verification -> no Enter
-- ambiguous failure after Enter -> invalidate the browser session
+- verified draft still present after Enter/Send failure -> clear the draft, release turn ownership, and preserve the browser session
+- composer cleared without submission evidence -> treat delivery as ambiguous and invalidate the browser session
 - failure before Enter -> preserve the retained page and clear only the draft
 - physical turn settlement timeout -> invalidate the retained browser session
 
