@@ -113,7 +113,7 @@ function pushError(stream: AssistantMessageEventStream, model: Model, error: unk
     ...baseMessage(model, "error"),
     errorMessage: message,
     ...(replaySuppressed
-      ? { errorId: AIError.create(AIError.Flag.UserInterrupt) }
+      ? { errorId: AIError.create(AIError.Flag.SilentAbort) }
       : {}),
   };
   stream.push({ type: "error", reason: "error", error: assistant });
@@ -325,12 +325,17 @@ export class WebModelProvider {
     } catch (error) {
       this.#broker.end(request);
 
-      // startTurn clears its BrowserTurn for failures that happened before
-      // submission was accepted. Preserve that retained/fresh page so an
-      // outer OMP retry does not close the last tab and relaunch Chrome.
-      // If a real browser turn is still active, its state is ambiguous and
-      // must be invalidated.
-      if (this.#browser.isTurnActive(conversation)) {
+      if (error instanceof ChatGptReplayUnsafeTurnError) {
+        // Do not replay the ordinary model turn, but keep the live retained
+        // ChatGPT page when possible. OMP's next pre-prompt maintenance can
+        // then send COMPACT directly into that exact thread instead of forcing
+        // a refresh/new tab first.
+        await this.#browser
+          .releaseReplayUnsafeTurnForMaintenance(conversation)
+          .catch(() => false);
+      } else if (this.#browser.isTurnActive(conversation)) {
+        // Other failures while a submitted browser turn is active remain
+        // ambiguous and must discard that retained conversation.
         await this.#browser.invalidateSession(conversation).catch(() => undefined);
       }
 

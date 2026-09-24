@@ -717,12 +717,21 @@ export class ChatGptBrowserBackend {
       // Temporary Chat instead of falling back to a different model or replaying
       // the ordinary agent turn.
       if (this.hasRetainedConversation(sessionKey)) {
-        return await this.compactRetainedSession(
-          sessionKey,
-          prompts.retained,
-          config,
-          signal,
-        );
+        try {
+          return await this.compactRetainedSession(
+            sessionKey,
+            prompts.retained,
+            config,
+            signal,
+          );
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          // The retained page survived the ordinary-turn failure, so prefer it
+          // and keep the compact prompt on that exact thread. If ChatGPT's
+          // failed-turn surface makes the composer unusable, retained
+          // compaction invalidates that page and this maintenance-only request
+          // can safely retry once in a fresh Temporary Chat.
+        }
       }
 
       return await this.compactFreshSession(
@@ -975,6 +984,31 @@ export class ChatGptBrowserBackend {
     }
   }
 
+
+  async releaseReplayUnsafeTurnForMaintenance(
+    sessionKey: string,
+  ): Promise<boolean> {
+    const turn = this.#turns.get(sessionKey);
+    if (turn?.approvalTimer) clearInterval(turn.approvalTimer);
+    this.#turns.delete(sessionKey);
+
+    const session = this.#sessions.get(sessionKey);
+    if (
+      !session ||
+      session.page.isClosed() ||
+      !this.#browser?.isConnected()
+    ) {
+      this.#sessions.delete(sessionKey);
+      return false;
+    }
+
+    // A ChatGPT timeout/retry surface means the current model turn cannot be
+    // replayed safely, but the page still contains the exact retained history
+    // that OMP wants to compact. Keep that page and seeded state intact. The
+    // compaction path snapshots the existing error UI as its baseline, so the
+    // old Retry card is not mistaken for a new compaction failure.
+    return true;
+  }
 
   async invalidateSession(sessionKey: string): Promise<void> {
     const turn = this.#turns.get(sessionKey);
