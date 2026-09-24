@@ -1690,6 +1690,15 @@ export class ChatGptBrowserBackend {
 
     while (Date.now() < readinessDeadline) {
       if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+      activeComposer = await this.#requireComposer(page);
+      if (
+        await this.#selectedConnectorIsExact(
+          activeComposer,
+          connectorName,
+        )
+      ) {
+        return activeComposer;
+      }
 
       // ChatGPT can report the previous turn as visually idle before connector
       // autocomplete is ready again. Probe capability instead of assuming a
@@ -1801,11 +1810,28 @@ export class ChatGptBrowserBackend {
       }
 
       activeComposer = await this.#requireComposer(page);
+      if (
+        await this.#selectedConnectorIsExact(
+          activeComposer,
+          connectorName,
+        )
+      ) {
+        return activeComposer;
+      }
       await activeComposer.fill("").catch(() => undefined);
       await sleep(retryDelayMs);
       activeComposer = await this.#requireComposer(page);
     }
 
+    activeComposer = await this.#requireComposer(page);
+    if (
+      await this.#selectedConnectorIsExact(
+        activeComposer,
+        connectorName,
+      )
+    ) {
+      return activeComposer;
+    }
     await activeComposer.fill("").catch(() => undefined);
     throw new Error(
       'ChatGPT did not become ready to attach the exact connector "' +
