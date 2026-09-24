@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Context } from "@oh-my-pi/pi-ai";
 import {
   assertValidCompactionSummary,
+  classifyOmpCompactionContext,
   compileCompactionPrompt,
   compileRetainedCompactionPrompt,
   isOmpCompactionContext,
@@ -20,13 +21,12 @@ function context(userText: string, system = OMP_SUMMARIZATION_SYSTEM_MARKER): Co
   };
 }
 
-test("detects OMP full compaction summary requests", () => {
-  assert.equal(
-    isOmpCompactionContext(context(
-      "<conversation>history</conversation>\n\nYou MUST summarize the conversation above into a structured handoff summary for another LLM to resume the task.",
-    )),
-    true,
+test("classifies OMP full compaction summary requests as structured maintenance", () => {
+  const request = context(
+    "<conversation>history</conversation>\n\nYou MUST summarize the conversation above into a structured handoff summary for another LLM to resume the task.",
   );
+  assert.equal(isOmpCompactionContext(request), true);
+  assert.equal(classifyOmpCompactionContext(request), "structured");
 });
 
 test("detects OMP short and turn-prefix compaction requests", () => {
@@ -53,7 +53,7 @@ test("detects custom compaction instructions under the OMP summarization system"
   );
 });
 
-test("detects OMP handoff compaction only when tools are disabled", () => {
+test("classifies OMP handoff separately and only when tools are disabled", () => {
   const handoff = context(
     "<critical>\nWrite a handoff document for another instance of yourself.\n" +
     "The handoff MUST be sufficient for seamless continuation without access to this conversation.\n" +
@@ -61,7 +61,15 @@ test("detects OMP handoff compaction only when tools are disabled", () => {
     "You are the live OMP coding agent.",
   );
   assert.equal(isOmpCompactionContext(handoff, { toolChoice: "none" }), true);
+  assert.equal(
+    classifyOmpCompactionContext(handoff, { toolChoice: "none" }),
+    "handoff",
+  );
   assert.equal(isOmpCompactionContext(handoff, { toolChoice: "auto" }), false);
+  assert.equal(
+    classifyOmpCompactionContext(handoff, { toolChoice: "auto" }),
+    undefined,
+  );
 });
 
 test("does not classify an ordinary agent turn as compaction", () => {
