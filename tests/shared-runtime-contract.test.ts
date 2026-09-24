@@ -71,7 +71,7 @@ test("connector selection fails closed unless the exact OMP app pill is attached
   );
   assert.match(browserSource, /keyword === connectorName/);
   assert.match(browserSource, /getAttribute\("data-highlighted"\)/);
-  assert.match(browserSource, /did not attach the exact connector/);
+  assert.match(browserSource, /did not become ready to attach the exact connector/);
 });
 
 test("completed Web turns remain owned until the browser physically settles", () => {
