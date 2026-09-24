@@ -1855,7 +1855,7 @@ export class ChatGptBrowserBackend {
       if (!signal?.aborted) return;
       if (await this.#clearUnsubmittedPromptDraft(page, prompt)) {
         throw new ChatGptPromptNotSubmittedError(
-          "OMP maintenance was cancelled before the ChatGPT prompt was submitted; the retained thread was preserved.",
+          "OMP provider prompt submission was cancelled before ChatGPT accepted it; the browser thread was preserved.",
         );
       }
       throw signal.reason ??
@@ -1899,7 +1899,7 @@ export class ChatGptBrowserBackend {
       }
       await abortIfNeeded();
       throw new Error(
-        "ChatGPT cleared the maintenance draft but did not show submission evidence.",
+        "ChatGPT cleared the provider prompt draft but did not show submission evidence.",
       );
     }
 
@@ -1926,12 +1926,12 @@ export class ChatGptBrowserBackend {
 
     if (await this.#clearUnsubmittedPromptDraft(page, prompt)) {
       throw new ChatGptPromptNotSubmittedError(
-        "ChatGPT did not submit the OMP maintenance prompt with Enter or the Send button; the retained thread was preserved.",
+        "ChatGPT did not submit the OMP provider prompt with Enter or the Send button; the browser thread was preserved.",
       );
     }
 
     throw new Error(
-      "ChatGPT maintenance submission became ambiguous after the composer draft disappeared.",
+      "ChatGPT provider prompt submission became ambiguous after the composer draft disappeared.",
     );
   }
 
@@ -1990,24 +1990,6 @@ export class ChatGptBrowserBackend {
           '" connector attached.',
       );
     }
-  }
-
-  async #waitForSubmissionEvidence(
-    page: Page,
-    baselineUserTurns = 0,
-  ): Promise<void> {
-    if (
-      await this.#waitForSubmissionEvidenceFor(
-        page,
-        baselineUserTurns,
-        12_000,
-      )
-    ) {
-      return;
-    }
-    throw new Error(
-      "ChatGPT Web did not show evidence that the OMP provider prompt was submitted.",
-    );
   }
 
   async #chatErrorBaseline(page: Page): Promise<ChatErrorBaseline> {
