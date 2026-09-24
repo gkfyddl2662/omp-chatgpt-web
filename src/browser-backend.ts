@@ -1737,6 +1737,147 @@ export class ChatGptBrowserBackend {
     );
   }
 
+  async #composerContainsPrompt(
+    composer: Locator,
+    prompt: string,
+  ): Promise<boolean> {
+    const actual = await this.#composerPromptText(composer).catch(() => "");
+    return this.#verifyComposerInsertion("", actual, prompt);
+  }
+
+  async #clearUnsubmittedMaintenanceDraft(
+    page: Page,
+    prompt: string,
+  ): Promise<boolean> {
+    const active = await this.#composer(page);
+    if (!active) return false;
+    if (!(await this.#composerContainsPrompt(active, prompt))) return false;
+    await active.fill("").catch(() => undefined);
+    return true;
+  }
+
+  async #sendButton(page: Page): Promise<Locator | undefined> {
+    return firstVisible(
+      [
+        page.locator('button[data-testid="send-button"]'),
+        page.getByRole("button", {
+          name: /Send prompt|Send message|Send|메시지 보내기|보내기/i,
+        }),
+      ],
+      150,
+    );
+  }
+
+  async #waitForSubmissionEvidenceFor(
+    page: Page,
+    baselineUserTurns: number,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) return false;
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+
+      const userTurns = page.locator('[data-message-author-role="user"]');
+      if ((await userTurns.count().catch(() => 0)) > baselineUserTurns) {
+        return true;
+      }
+
+      const stop = await this.#stopButton(page);
+      if (stop) return true;
+      await sleep(150);
+    }
+    return false;
+  }
+
+  async #submitMaintenancePrompt(
+    page: Page,
+    composer: Locator,
+    prompt: string,
+    baselineUserTurns: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const abortIfNeeded = async (): Promise<void> => {
+      if (!signal?.aborted) return;
+      if (await this.#clearUnsubmittedMaintenanceDraft(page, prompt)) {
+        throw new ChatGptMaintenanceNotSubmittedError(
+          "OMP maintenance was cancelled before the ChatGPT prompt was submitted; the retained thread was preserved.",
+        );
+      }
+      throw signal.reason ??
+        new DOMException("OMP maintenance submission aborted", "AbortError");
+    };
+
+    await abortIfNeeded();
+    await composer.press("Enter");
+
+    if (
+      await this.#waitForSubmissionEvidenceFor(
+        page,
+        baselineUserTurns,
+        1_500,
+        signal,
+      )
+    ) {
+      return;
+    }
+
+    await abortIfNeeded();
+
+    const active = await this.#composer(page);
+    const draftStillPresent = Boolean(
+      active && await this.#composerContainsPrompt(active, prompt),
+    );
+
+    if (!draftStillPresent) {
+      // The editor already cleared, which can precede React rendering the new
+      // user message. Do not click Send again; just allow more time for
+      // submission evidence to appear.
+      if (
+        await this.#waitForSubmissionEvidenceFor(
+          page,
+          baselineUserTurns,
+          10_500,
+          signal,
+        )
+      ) {
+        return;
+      }
+      await abortIfNeeded();
+      throw new Error(
+        "ChatGPT cleared the maintenance draft but did not show submission evidence.",
+      );
+    }
+
+    const send = await this.#sendButton(page);
+    if (send && await send.isEnabled().catch(() => true)) {
+      await send.click();
+      if (
+        await this.#waitForSubmissionEvidenceFor(
+          page,
+          baselineUserTurns,
+          12_000,
+          signal,
+        )
+      ) {
+        return;
+      }
+    }
+
+    await abortIfNeeded();
+
+    if (await this.#clearUnsubmittedMaintenanceDraft(page, prompt)) {
+      throw new ChatGptMaintenanceNotSubmittedError(
+        "ChatGPT did not submit the OMP maintenance prompt with Enter or the Send button; the retained thread was preserved.",
+      );
+    }
+
+    throw new Error(
+      "ChatGPT maintenance submission became ambiguous after the composer draft disappeared.",
+    );
+  }
+
   async #prepareCompactionComposer(
     page: Page,
     composer: Locator,
@@ -1798,17 +1939,14 @@ export class ChatGptBrowserBackend {
     page: Page,
     baselineUserTurns = 0,
   ): Promise<void> {
-    const deadline = Date.now() + 12_000;
-    while (Date.now() < deadline) {
-      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
-      const userTurns = page.locator('[data-message-author-role="user"]');
-      if ((await userTurns.count().catch(() => 0)) > baselineUserTurns) {
-        return;
-      }
-
-      const stop = await this.#stopButton(page);
-      if (stop) return;
-      await sleep(250);
+    if (
+      await this.#waitForSubmissionEvidenceFor(
+        page,
+        baselineUserTurns,
+        12_000,
+      )
+    ) {
+      return;
     }
     throw new Error(
       "ChatGPT Web did not show evidence that the OMP provider prompt was submitted.",
