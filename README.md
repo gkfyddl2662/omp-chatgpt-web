@@ -183,16 +183,22 @@ does **not** click ChatGPT's Retry button for these failures: a long OMP turn ma
 already have executed side-effecting tools, so replaying the browser turn could
 repeat completed work.
 
-Instead, the active Web turn is ended with a replay-suppressed, non-retryable
-OMP error and the broken retained browser conversation is discarded. OMP keeps
-the tool results and repository state it already recorded. If an OMP Goal is
-still active, its normal hidden Goal continuation owns the next turn; OMP runs
-its pre-prompt context maintenance first, so an oversized context can Auto-shake
-or compact before a fresh ChatGPT Temporary Chat receives the continuation.
+Instead, the active Web turn is ended as a silent, replay-suppressed,
+non-retryable OMP transition. The browser page itself is preserved when it is
+still alive, because it contains the exact retained history needed for the next
+context-maintenance pass. OMP keeps the tool results and repository state it
+already recorded.
 
-This is intentionally different from compaction itself: retained compaction may
-use ChatGPT's native Retry once for the same summary request, but an ordinary
-agent turn is never browser-retried automatically.
+If an OMP Goal is still active, its normal hidden Goal continuation owns the
+next turn. OMP runs pre-prompt maintenance first; an oversized context can
+Auto-shake and then send COMPACT directly into the same retained ChatGPT thread.
+Only if that retained page cannot accept the compaction request does the
+maintenance-only compaction retry in a fresh Temporary Chat.
+
+This is intentionally different from replaying the ordinary agent turn:
+ChatGPT's Retry button is never clicked automatically for the failed agent turn,
+while a compaction-only request may retry because it has no OMP tool side
+effects.
 
 ## Task agents and subagents
 
