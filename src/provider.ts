@@ -13,9 +13,9 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { RuntimeConfig } from "./config.js";
 import {
+  classifyOmpCompactionContext,
   compileCompactionPrompt,
   compileRetainedCompactionPrompt,
-  isOmpCompactionContext,
 } from "./compaction.js";
 import {
   ChatGptReplayUnsafeTurnError,
@@ -249,20 +249,29 @@ export class WebModelProvider {
         return;
       }
 
-      if (isOmpCompactionContext(context, options)) {
+      const compactionKind = classifyOmpCompactionContext(
+        context,
+        options,
+      );
+      if (compactionKind) {
         try {
-          // OMP's compaction side request is self-contained: when the retained
-          // ChatGPT thread survived, use the short retained prompt; when that
-          // thread was invalidated by a browser failure, use the full dedicated
-          // maintenance context in a fresh Temporary Chat. This is not an
-          // ordinary agent-turn replay and never attaches OMP Local/tools.
+          // A handoff depends on the live retained ChatGPT thread. Replaying an
+          // already-overflowing whole history into a fresh tab defeats the
+          // purpose of handoff and can overflow ChatGPT itself. Structured
+          // context-full compaction is different: OMP explicitly constructs a
+          // self-contained maintenance request, so that one may use a fresh
+          // tool-free Temporary Chat when retained history is unavailable.
           const retainedPrompt = compileRetainedCompactionPrompt(context);
-          const freshPrompt = compileCompactionPrompt(context);
+          const freshPrompt =
+            compactionKind === "structured"
+              ? compileCompactionPrompt(context)
+              : undefined;
           const summary = await this.#browser.compactSessionWhenIdle(
             conversation,
             {
+              kind: compactionKind,
               retained: retainedPrompt,
-              fresh: freshPrompt,
+              ...(freshPrompt ? { fresh: freshPrompt } : {}),
             },
             this.#config,
             signal,

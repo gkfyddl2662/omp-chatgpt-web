@@ -284,18 +284,26 @@ Retained compaction uses the same direct composer insertion strategy as
 ordinary turns (ProseMirror -> Lexical -> execCommand -> CDP).
 
 Compaction prefers the retained ChatGPT conversation when it is still
-available. If that thread was lost or invalidated (for example after an ordinary
-Web turn hit ChatGPT's timeout/retry UI), the provider uses OMP's self-contained
-compaction side request in a **fresh Temporary Chat** instead. That fresh request
-contains the compaction system instructions and source conversation OMP already
-prepared; it does not attach OMP Local, execute tools, or replay the ordinary
-agent turn.
+available. **Structured context-full maintenance** may use OMP's self-contained
+compaction side request in a fresh Temporary Chat if retained history is truly
+unavailable. **Handoff does not use that fresh full-history fallback**: a
+handoff must summarize the retained ChatGPT thread. If retained handoff cannot
+be submitted, the provider returns the failure so OMP can advance to shake or
+the next configured maintenance method instead of pasting an already-overflowing
+history into a fresh ChatGPT tab.
 
-Both retained and fresh compaction remain fail-closed around the returned
-summary: browser/server error text, maintenance-prompt echoes, and large source
-prompt replays are rejected before OMP can commit the destructive history
-rewrite. After either path succeeds, a clean replacement Temporary Chat is
-prepared so the next ordinary turn seeds OMP's compacted context from scratch.
+Maintenance submission is also hardened against ChatGPT composer UI races. The
+provider tries Enter first, briefly checks for a new user turn or generation
+state, and—only when the verified maintenance draft is still present—clicks the
+visible Send button as a fallback. If the draft remains unsubmitted, it is
+cleared and the retained thread is preserved.
+
+Both retained and fresh structured compaction remain fail-closed around the
+returned summary: browser/server error text, maintenance-prompt echoes, and
+large source-prompt replays are rejected before OMP can commit the destructive
+history rewrite. After a successful compaction/handoff, a clean replacement
+Temporary Chat is prepared so the next ordinary turn seeds OMP's compacted
+context from scratch.
 
 New ordinary turns are serialized behind the compaction boundary so they cannot
 race the summary/reset handoff.

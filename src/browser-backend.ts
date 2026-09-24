@@ -8,7 +8,10 @@ import {
   type Page,
 } from "playwright-core";
 import type { RuntimeConfig } from "./config.js";
-import { assertValidCompactionSummary } from "./compaction.js";
+import {
+  assertValidCompactionSummary,
+  type OmpCompactionKind,
+} from "./compaction.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -47,6 +50,13 @@ export class ChatGptReplayUnsafeTurnError extends Error {
     );
     this.name = "ChatGptReplayUnsafeTurnError";
     this.browserMessage = browserMessage;
+  }
+}
+
+class ChatGptMaintenanceNotSubmittedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatGptMaintenanceNotSubmittedError";
   }
 }
 
@@ -694,7 +704,11 @@ export class ChatGptBrowserBackend {
 
   async compactSessionWhenIdle(
     sessionKey: string,
-    prompts: { retained: string; fresh: string },
+    prompts: {
+      kind: OmpCompactionKind;
+      retained: string;
+      fresh?: string;
+    },
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
@@ -726,12 +740,30 @@ export class ChatGptBrowserBackend {
           );
         } catch (error) {
           if (signal?.aborted) throw error;
-          // The retained page survived the ordinary-turn failure, so prefer it
-          // and keep the compact prompt on that exact thread. If ChatGPT's
-          // failed-turn surface makes the composer unusable, retained
-          // compaction invalidates that page and this maintenance-only request
-          // can safely retry once in a fresh Temporary Chat.
+          if (prompts.kind === "handoff") {
+            // Handoff must stay attached to the retained history. If its
+            // retained submission fails, return the failure to OMP so the
+            // maintenance method order can move on (for example to shake)
+            // instead of replaying an already-overflowing whole history into a
+            // fresh ChatGPT tab.
+            throw error;
+          }
+
+          // Structured context-full maintenance is a self-contained OMP side
+          // request and may safely retry once in a fresh tool-free chat. If
+          // the retained failure was definitely pre-submission, the retained
+          // page was intentionally preserved; retire it before creating the
+          // fresh maintenance page.
+          if (this.hasRetainedConversation(sessionKey)) {
+            await this.invalidateSession(sessionKey);
+          }
         }
+      }
+
+      if (prompts.kind === "handoff" || !prompts.fresh) {
+        throw new Error(
+          "Auto-handoff requires the retained ChatGPT conversation; fresh full-history handoff replay is disabled.",
+        );
       }
 
       return await this.compactFreshSession(
@@ -845,8 +877,13 @@ export class ChatGptBrowserBackend {
       );
       const insertedAt = Date.now();
 
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      await this.#submitMaintenancePrompt(
+        page,
+        composer,
+        prompt,
+        baselineUsers,
+        signal,
+      );
       const submittedAt = Date.now();
       this.#lastPreparation = {
         kind: "retained-compaction",
@@ -879,6 +916,12 @@ export class ChatGptBrowserBackend {
       await this.#resetSessionPage(sessionKey, config);
       return summary;
     } catch (error) {
+      if (error instanceof ChatGptMaintenanceNotSubmittedError) {
+        // The draft never left the composer. Preserve the retained history so
+        // OMP can advance to shake/another maintenance method and retry handoff
+        // later without forcing a new full-history browser seed.
+        throw error;
+      }
       await this.invalidateSession(sessionKey);
       throw error;
     }
@@ -945,8 +988,13 @@ export class ChatGptBrowserBackend {
       );
       const insertedAt = Date.now();
 
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      await this.#submitMaintenancePrompt(
+        page,
+        composer,
+        prompt,
+        baselineUsers,
+        signal,
+      );
       const submittedAt = Date.now();
       this.#lastPreparation = {
         kind: "fresh-compaction",
@@ -1705,6 +1753,147 @@ export class ChatGptBrowserBackend {
     );
   }
 
+  async #composerContainsPrompt(
+    composer: Locator,
+    prompt: string,
+  ): Promise<boolean> {
+    const actual = await this.#composerPromptText(composer).catch(() => "");
+    return this.#verifyComposerInsertion("", actual, prompt);
+  }
+
+  async #clearUnsubmittedMaintenanceDraft(
+    page: Page,
+    prompt: string,
+  ): Promise<boolean> {
+    const active = await this.#composer(page);
+    if (!active) return false;
+    if (!(await this.#composerContainsPrompt(active, prompt))) return false;
+    await active.fill("").catch(() => undefined);
+    return true;
+  }
+
+  async #sendButton(page: Page): Promise<Locator | undefined> {
+    return firstVisible(
+      [
+        page.locator('button[data-testid="send-button"]'),
+        page.getByRole("button", {
+          name: /Send prompt|Send message|Send|메시지 보내기|보내기/i,
+        }),
+      ],
+      150,
+    );
+  }
+
+  async #waitForSubmissionEvidenceFor(
+    page: Page,
+    baselineUserTurns: number,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (signal?.aborted) return false;
+      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+
+      const userTurns = page.locator('[data-message-author-role="user"]');
+      if ((await userTurns.count().catch(() => 0)) > baselineUserTurns) {
+        return true;
+      }
+
+      const stop = await this.#stopButton(page);
+      if (stop) return true;
+      await sleep(150);
+    }
+    return false;
+  }
+
+  async #submitMaintenancePrompt(
+    page: Page,
+    composer: Locator,
+    prompt: string,
+    baselineUserTurns: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const abortIfNeeded = async (): Promise<void> => {
+      if (!signal?.aborted) return;
+      if (await this.#clearUnsubmittedMaintenanceDraft(page, prompt)) {
+        throw new ChatGptMaintenanceNotSubmittedError(
+          "OMP maintenance was cancelled before the ChatGPT prompt was submitted; the retained thread was preserved.",
+        );
+      }
+      throw signal.reason ??
+        new DOMException("OMP maintenance submission aborted", "AbortError");
+    };
+
+    await abortIfNeeded();
+    await composer.press("Enter");
+
+    if (
+      await this.#waitForSubmissionEvidenceFor(
+        page,
+        baselineUserTurns,
+        1_500,
+        signal,
+      )
+    ) {
+      return;
+    }
+
+    await abortIfNeeded();
+
+    const active = await this.#composer(page);
+    const draftStillPresent = Boolean(
+      active && await this.#composerContainsPrompt(active, prompt),
+    );
+
+    if (!draftStillPresent) {
+      // The editor already cleared, which can precede React rendering the new
+      // user message. Do not click Send again; just allow more time for
+      // submission evidence to appear.
+      if (
+        await this.#waitForSubmissionEvidenceFor(
+          page,
+          baselineUserTurns,
+          10_500,
+          signal,
+        )
+      ) {
+        return;
+      }
+      await abortIfNeeded();
+      throw new Error(
+        "ChatGPT cleared the maintenance draft but did not show submission evidence.",
+      );
+    }
+
+    const send = await this.#sendButton(page);
+    if (send && await send.isEnabled().catch(() => true)) {
+      await send.click();
+      if (
+        await this.#waitForSubmissionEvidenceFor(
+          page,
+          baselineUserTurns,
+          12_000,
+          signal,
+        )
+      ) {
+        return;
+      }
+    }
+
+    await abortIfNeeded();
+
+    if (await this.#clearUnsubmittedMaintenanceDraft(page, prompt)) {
+      throw new ChatGptMaintenanceNotSubmittedError(
+        "ChatGPT did not submit the OMP maintenance prompt with Enter or the Send button; the retained thread was preserved.",
+      );
+    }
+
+    throw new Error(
+      "ChatGPT maintenance submission became ambiguous after the composer draft disappeared.",
+    );
+  }
+
   async #prepareCompactionComposer(
     page: Page,
     composer: Locator,
@@ -1766,17 +1955,14 @@ export class ChatGptBrowserBackend {
     page: Page,
     baselineUserTurns = 0,
   ): Promise<void> {
-    const deadline = Date.now() + 12_000;
-    while (Date.now() < deadline) {
-      if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
-      const userTurns = page.locator('[data-message-author-role="user"]');
-      if ((await userTurns.count().catch(() => 0)) > baselineUserTurns) {
-        return;
-      }
-
-      const stop = await this.#stopButton(page);
-      if (stop) return;
-      await sleep(250);
+    if (
+      await this.#waitForSubmissionEvidenceFor(
+        page,
+        baselineUserTurns,
+        12_000,
+      )
+    ) {
+      return;
     }
     throw new Error(
       "ChatGPT Web did not show evidence that the OMP provider prompt was submitted.",

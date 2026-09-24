@@ -220,19 +220,28 @@ retained browser session exists, compaction:
 
 New ordinary turns wait behind this boundary.
 
-If the retained conversation is unavailable or becomes invalid while the
-compaction waits for the prior turn to settle, the backend switches to a fresh
-Temporary Chat and submits the **self-contained OMP compaction side request**.
-That request carries the exact compaction system instructions and source
-conversation produced by OMP. It is maintenance-only: no connector is attached,
-no OMP tools are exposed, and the ordinary agent turn is not replayed.
+Structured context-full maintenance can switch to a fresh Temporary
+Chat when retained history is unavailable. The fresh request is the
+**self-contained OMP compaction side request**: it carries the exact compaction
+system instructions and source conversation produced by OMP, attaches no
+connector, exposes no OMP tools, and never replays the ordinary agent turn.
 
-Before either retained or fresh compaction can succeed, the backend checks
-ChatGPT's visible error/retry UI and validates the returned text.
-Browser/server error text, maintenance-prompt echoes, and large source-prompt
-replays are rejected. ChatGPT's Retry action may be attempted once on the same
-submitted compaction because the side request has no tool side effects; if it
-still fails, the compaction fails.
+Handoff is intentionally stricter. It is retained-thread-only because pasting
+the full OMP history into a fresh tab can itself exceed ChatGPT's input limit at
+the exact moment handoff is needed. If retained handoff fails before submission,
+the draft is cleared, the retained page is kept, and OMP receives the failure so
+its configured maintenance order can move to shake/another method.
+
+Maintenance submission uses a two-stage transport check: Enter first, then a
+Send-button fallback only if submission evidence is still absent and the
+verified draft remains in the composer. A vanished draft is treated as
+potentially submitted and is never double-sent.
+
+Before any successful summary is accepted, the backend checks ChatGPT's visible
+error/retry UI and validates the returned text. Browser/server error text,
+maintenance-prompt echoes, and large source-prompt replays are rejected.
+ChatGPT's Retry action may be attempted once on an already-submitted compaction
+request because the maintenance request has no OMP tool side effects.
 
 Page retirement remains last-tab safe: when a stale page is Chrome's only
 remaining page, the backend navigates it to `about:blank` rather than closing

@@ -103,12 +103,13 @@ test("obsolete retained-session experiment state is absent", () => {
 
 
 
-test("compaction prefers retained Web history and falls back to a fresh maintenance-only Web request", () => {
-  const start = providerSource.indexOf("if (isOmpCompactionContext(context, options))");
+test("provider distinguishes handoff from structured maintenance before choosing fresh fallback", () => {
+  const start = providerSource.indexOf("const compactionKind = classifyOmpCompactionContext(");
   const end = providerSource.indexOf("const expectedToolCallId", start);
   assert.ok(start >= 0 && end > start);
   const block = providerSource.slice(start, end);
 
+  assert.match(block, /compactionKind === "structured"/);
   assert.match(block, /compileRetainedCompactionPrompt/);
   assert.match(block, /compileCompactionPrompt/);
   assert.match(block, /compactSessionWhenIdle/);
@@ -186,15 +187,43 @@ test("browser timeout releases only turn ownership and preserves retained histor
   assert.doesNotMatch(block, /page\.goto\(/);
 });
 
-test("retained compaction failure may retry only the maintenance request in a fresh Web chat", () => {
+test("handoff stays retained-only while structured maintenance may retry fresh", () => {
   const start = browserSource.indexOf("async compactSessionWhenIdle(");
   const end = browserSource.indexOf("async compactRetainedSessionWhenIdle(", start);
   assert.ok(start >= 0 && end > start);
   const block = browserSource.slice(start, end);
 
-  assert.match(block, /try \{/);
-  assert.match(block, /compactRetainedSession/);
-  assert.match(block, /catch \(error\)/);
+  assert.match(block, /prompts\.kind === "handoff"/);
+  assert.match(block, /throw error/);
+  assert.match(block, /fresh full-history handoff replay is disabled/);
   assert.match(block, /compactFreshSession/);
   assert.match(block, /if \(signal\?\.aborted\) throw error/);
+});
+
+test("maintenance submission falls back from Enter to the ChatGPT Send button", () => {
+  const start = browserSource.indexOf("async #submitMaintenancePrompt(");
+  const end = browserSource.indexOf("async #prepareCompactionComposer(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /composer\.press\("Enter"\)/);
+  assert.match(block, /#sendButton\(page\)/);
+  assert.match(block, /send\.click\(\)/);
+  assert.match(block, /#waitForSubmissionEvidenceFor/);
+  assert.match(browserSource, /button\[data-testid="send-button"\]/);
+});
+
+test("definitely unsubmitted retained maintenance preserves the retained thread", () => {
+  const start = browserSource.indexOf("async compactRetainedSession(");
+  const end = browserSource.indexOf("async compactFreshSession(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /ChatGptMaintenanceNotSubmittedError/);
+  const catchStart = block.indexOf("} catch (error) {");
+  assert.ok(catchStart >= 0);
+  const catchBlock = block.slice(catchStart);
+  assert.match(catchBlock, /instanceof ChatGptMaintenanceNotSubmittedError/);
+  assert.match(catchBlock, /throw error/);
+  assert.match(catchBlock, /invalidateSession\(sessionKey\)/);
 });
