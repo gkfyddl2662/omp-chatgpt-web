@@ -201,7 +201,7 @@ test("handoff stays retained-only while structured maintenance may retry fresh",
 });
 
 test("maintenance submission falls back from Enter to the ChatGPT Send button", () => {
-  const start = browserSource.indexOf("async #submitMaintenancePrompt(");
+  const start = browserSource.indexOf("async #submitComposerPrompt(");
   const end = browserSource.indexOf("async #prepareCompactionComposer(", start);
   assert.ok(start >= 0 && end > start);
   const block = browserSource.slice(start, end);
@@ -219,11 +219,11 @@ test("definitely unsubmitted retained maintenance preserves the retained thread"
   assert.ok(start >= 0 && end > start);
   const block = browserSource.slice(start, end);
 
-  assert.match(block, /ChatGptMaintenanceNotSubmittedError/);
+  assert.match(block, /ChatGptPromptNotSubmittedError/);
   const catchStart = block.indexOf("} catch (error) {");
   assert.ok(catchStart >= 0);
   const catchBlock = block.slice(catchStart);
-  assert.match(catchBlock, /instanceof ChatGptMaintenanceNotSubmittedError/);
+  assert.match(catchBlock, /instanceof ChatGptPromptNotSubmittedError/);
   assert.match(catchBlock, /throw error/);
   assert.match(catchBlock, /invalidateSession\(sessionKey\)/);
 });
