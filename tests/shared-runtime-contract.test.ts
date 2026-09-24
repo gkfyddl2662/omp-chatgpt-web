@@ -162,11 +162,39 @@ test("ordinary Web turns detect ChatGPT timeout UI without clicking browser Retr
   assert.doesNotMatch(block, /\.retry\.click\(/);
 });
 
-test("replay-unsafe browser failures are marked non-retryable for OMP", () => {
+test("replay-unsafe browser failures are silent and non-retryable for OMP", () => {
   assert.match(providerSource, /ChatGptReplayUnsafeTurnError/);
-  assert.match(providerSource, /AIError\.Flag\.UserInterrupt/);
+  assert.match(providerSource, /AIError\.Flag\.SilentAbort/);
+  assert.doesNotMatch(providerSource, /AIError\.Flag\.UserInterrupt/);
   assert.doesNotMatch(
     providerSource,
     /browserMessage.*errorMessage|errorMessage.*browserMessage/,
   );
+});
+
+test("browser timeout releases only turn ownership and preserves retained history for COMPACT", () => {
+  assert.match(providerSource, /releaseReplayUnsafeTurnForMaintenance\(conversation\)/);
+
+  const start = browserSource.indexOf("async releaseReplayUnsafeTurnForMaintenance(");
+  const end = browserSource.indexOf("async invalidateSession(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /this\.#turns\.delete\(sessionKey\)/);
+  assert.match(block, /return true/);
+  assert.doesNotMatch(block, /#releasePageWithoutStoppingBrowser/);
+  assert.doesNotMatch(block, /page\.goto\(/);
+});
+
+test("retained compaction failure may retry only the maintenance request in a fresh Web chat", () => {
+  const start = browserSource.indexOf("async compactSessionWhenIdle(");
+  const end = browserSource.indexOf("async compactRetainedSessionWhenIdle(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /try \{/);
+  assert.match(block, /compactRetainedSession/);
+  assert.match(block, /catch \(error\)/);
+  assert.match(block, /compactFreshSession/);
+  assert.match(block, /if \(signal\?\.aborted\) throw error/);
 });
