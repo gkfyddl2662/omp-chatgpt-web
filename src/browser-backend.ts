@@ -877,8 +877,13 @@ export class ChatGptBrowserBackend {
       );
       const insertedAt = Date.now();
 
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      await this.#submitMaintenancePrompt(
+        page,
+        composer,
+        prompt,
+        baselineUsers,
+        signal,
+      );
       const submittedAt = Date.now();
       this.#lastPreparation = {
         kind: "retained-compaction",
@@ -911,6 +916,12 @@ export class ChatGptBrowserBackend {
       await this.#resetSessionPage(sessionKey, config);
       return summary;
     } catch (error) {
+      if (error instanceof ChatGptMaintenanceNotSubmittedError) {
+        // The draft never left the composer. Preserve the retained history so
+        // OMP can advance to shake/another maintenance method and retry handoff
+        // later without forcing a new full-history browser seed.
+        throw error;
+      }
       await this.invalidateSession(sessionKey);
       throw error;
     }
@@ -977,8 +988,13 @@ export class ChatGptBrowserBackend {
       );
       const insertedAt = Date.now();
 
-      await composer.press("Enter");
-      await this.#waitForSubmissionEvidence(page, baselineUsers);
+      await this.#submitMaintenancePrompt(
+        page,
+        composer,
+        prompt,
+        baselineUsers,
+        signal,
+      );
       const submittedAt = Date.now();
       this.#lastPreparation = {
         kind: "fresh-compaction",
