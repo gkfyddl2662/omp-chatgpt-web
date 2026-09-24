@@ -227,3 +227,42 @@ test("definitely unsubmitted retained maintenance preserves the retained thread"
   assert.match(catchBlock, /throw error/);
   assert.match(catchBlock, /invalidateSession\(sessionKey\)/);
 });
+
+
+test("ordinary Web turns use Enter then guarded Send fallback before invalidating", () => {
+  const start = browserSource.indexOf("async startTurn(");
+  const end = browserSource.indexOf("async finishTurn(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  assert.match(block, /#submitComposerPrompt\(/);
+  assert.match(block, /beforeFallbackSend/);
+  assert.match(block, /#selectedConnectorIsExact/);
+  assert.match(block, /ChatGptPromptNotSubmittedError/);
+  assert.match(block, /#recoverUnsubmittedTurn/);
+  assert.match(block, /invalidateSession\(sessionKey\)/);
+  assert.doesNotMatch(block, /#waitForSubmissionEvidence\(page, baselineUsers\)/);
+});
+
+test("definite ordinary submission misses are silent recoveries for active Goals", () => {
+  assert.match(providerSource, /ChatGptPromptNotSubmittedError/);
+  assert.match(
+    providerSource,
+    /error instanceof ChatGptReplayUnsafeTurnError[\s\S]*error instanceof ChatGptPromptNotSubmittedError/,
+  );
+  assert.match(providerSource, /AIError\.Flag\.SilentAbort/);
+});
+
+test("shared composer submit helper clicks Send only after Enter leaves a verified draft", () => {
+  const start = browserSource.indexOf("async #submitComposerPrompt(");
+  const end = browserSource.indexOf("async #prepareCompactionComposer(", start);
+  assert.ok(start >= 0 && end > start);
+  const block = browserSource.slice(start, end);
+
+  const enter = block.indexOf('composer.press("Enter")');
+  const draft = block.indexOf("draftStillPresent");
+  const send = block.indexOf("send.click()");
+  assert.ok(enter >= 0 && draft > enter && send > draft);
+  assert.match(block, /beforeFallbackSend/);
+  assert.match(block, /#clearUnsubmittedPromptDraft/);
+});
