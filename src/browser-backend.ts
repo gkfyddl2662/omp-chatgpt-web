@@ -1681,108 +1681,162 @@ export class ChatGptBrowserBackend {
 
     const mentionQuery =
       connectorName.trim().split(/\s+/)[0] || connectorName;
+    const mentionText = "@" + mentionQuery;
+    const readinessDeadline = Date.now() + 180_000;
+    const probeWindowMs = 2_000;
+    const retryDelayMs = 400;
+    const attachWindowMs = 10_000;
+    let activeComposer = composer;
 
-    await composer.fill("");
-    await composer.focus();
-    await composer.fill("@" + mentionQuery);
-
-    const currentMentionText = (
-      (await composer.textContent().catch(() => "")) ||
-      (await composer.inputValue().catch(() => ""))
-    ).trim();
-
-    if (currentMentionText !== "@" + mentionQuery) {
-      throw new Error(
-        'ChatGPT did not preserve the @mention query "@' +
-          mentionQuery +
-          '".',
-      );
-    }
-
-    // Current ChatGPT connector menus expose keyboard-owned menu rows with
-    // tabindex=0. Prove the exact OMP Local row, then ensure that exact row is
-    // highlighted before pressing Enter. Merely seeing the label is not enough.
-    const menuRows = page
-      .locator('.__menu-item[tabindex="0"]')
-      .filter({ visible: true });
-    const exactRow = menuRows.filter({
-      has: page.getByText(connectorName, { exact: true }),
-    });
-
-    const deadline = Date.now() + 12_000;
-    let exactVisible = false;
-    while (Date.now() < deadline) {
+    while (Date.now() < readinessDeadline) {
       if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
-
-      const count = await exactRow.count().catch(() => 0);
-      if (count === 1 && await exactRow.first().isVisible().catch(() => false)) {
-        exactVisible = true;
-        break;
-      }
-      if (count > 1) {
-        throw new Error(
-          'ChatGPT exposed multiple exact @mention rows for "' +
-            connectorName +
-            '".',
-        );
-      }
-
-      await sleep(50);
-    }
-
-    if (!exactVisible) {
-      throw new Error(
-        'ChatGPT did not expose one exact @mention menu row for "' +
-          connectorName +
-          '" within 12 seconds.',
-      );
-    }
-
-    const row = exactRow.first();
-    const highlighted = async (): Promise<boolean> =>
-      (await row.getAttribute("data-highlighted").catch(() => null)) !== null;
-
-    if (!(await highlighted())) {
-      const visibleRows = await menuRows.count().catch(() => 0);
-      for (
-        let step = 0;
-        step < Math.max(1, visibleRows) && !(await highlighted());
-        step += 1
+      activeComposer = await this.#requireComposer(page);
+      if (
+        await this.#selectedConnectorIsExact(
+          activeComposer,
+          connectorName,
+        )
       ) {
-        await composer.press("ArrowDown");
-        await sleep(25);
+        return activeComposer;
       }
-    }
 
-    if (!(await highlighted())) {
-      throw new Error(
-        'ChatGPT @mention menu could not highlight "' +
-          connectorName +
-          '".',
+      // ChatGPT can report the previous turn as visually idle before connector
+      // autocomplete is ready again. Probe capability instead of assuming a
+      // fixed post-turn delay: type only the short @mention query, look for the
+      // exact connector row, then clear and retry with a freshly resolved
+      // composer while the global 180s readiness budget remains.
+      await activeComposer.fill("").catch(() => undefined);
+      activeComposer = await this.#requireComposer(page);
+      await activeComposer.focus();
+      await activeComposer.fill(mentionText);
+
+      const currentMentionText = (
+        (await activeComposer.textContent().catch(() => "")) ||
+        (await activeComposer.inputValue().catch(() => ""))
+      ).trim();
+
+      if (currentMentionText !== mentionText) {
+        await activeComposer.fill("").catch(() => undefined);
+        await sleep(retryDelayMs);
+        activeComposer = await this.#requireComposer(page);
+        continue;
+      }
+
+      const menuRows = page
+        .locator('.__menu-item[tabindex="0"]')
+        .filter({ visible: true });
+      const exactRow = menuRows.filter({
+        has: page.getByText(connectorName, { exact: true }),
+      });
+
+      const probeDeadline = Math.min(
+        readinessDeadline,
+        Date.now() + probeWindowMs,
       );
-    }
+      let row: Locator | undefined;
 
-    await composer.press("Enter");
+      while (Date.now() < probeDeadline) {
+        if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
 
-    // Connector selection can replace the active editor/composer subtree. Resolve
-    // the active composer again, then fail closed unless the exact app pill is
-    // present. This prevents a first turn from silently proceeding unbound.
-    const selectedComposer = await this.#requireComposer(page);
-    const selectionDeadline = Date.now() + 5_000;
-    while (Date.now() < selectionDeadline) {
-      if (await this.#selectedConnectorIsExact(
-        selectedComposer,
-        connectorName,
-      )) {
-        return selectedComposer;
+        const count = await exactRow.count().catch(() => 0);
+        if (count > 1) {
+          throw new Error(
+            'ChatGPT exposed multiple exact @mention rows for "' +
+              connectorName +
+              '".',
+          );
+        }
+        if (
+          count === 1 &&
+          await exactRow.first().isVisible().catch(() => false)
+        ) {
+          row = exactRow.first();
+          break;
+        }
+        await sleep(50);
       }
-      await sleep(50);
+
+      if (!row) {
+        await activeComposer.fill("").catch(() => undefined);
+        await sleep(retryDelayMs);
+        activeComposer = await this.#requireComposer(page);
+        continue;
+      }
+
+      const highlighted = async (): Promise<boolean> =>
+        (await row.getAttribute("data-highlighted").catch(() => null)) !== null;
+
+      if (!(await highlighted())) {
+        const visibleRows = await menuRows.count().catch(() => 0);
+        for (
+          let step = 0;
+          step < Math.max(1, visibleRows) && !(await highlighted());
+          step += 1
+        ) {
+          await activeComposer.press("ArrowDown");
+          await sleep(25);
+        }
+      }
+
+      if (!(await highlighted())) {
+        await activeComposer.fill("").catch(() => undefined);
+        await sleep(retryDelayMs);
+        activeComposer = await this.#requireComposer(page);
+        continue;
+      }
+
+      await activeComposer.press("Enter");
+
+      // Connector selection can replace the active composer subtree. Give the
+      // exact pill time to attach, but if ChatGPT was still internally settling
+      // and selection did not stick, retry the capability probe instead of
+      // failing the entire OMP turn immediately.
+      const attachDeadline = Math.min(
+        readinessDeadline,
+        Date.now() + attachWindowMs,
+      );
+      while (Date.now() < attachDeadline) {
+        if (page.isClosed()) throw new Error("ChatGPT tab was closed.");
+        const selectedComposer = await this.#requireComposer(page);
+        if (
+          await this.#selectedConnectorIsExact(
+            selectedComposer,
+            connectorName,
+          )
+        ) {
+          return selectedComposer;
+        }
+        await sleep(100);
+      }
+
+      activeComposer = await this.#requireComposer(page);
+      if (
+        await this.#selectedConnectorIsExact(
+          activeComposer,
+          connectorName,
+        )
+      ) {
+        return activeComposer;
+      }
+      await activeComposer.fill("").catch(() => undefined);
+      await sleep(retryDelayMs);
+      activeComposer = await this.#requireComposer(page);
     }
 
+    activeComposer = await this.#requireComposer(page);
+    if (
+      await this.#selectedConnectorIsExact(
+        activeComposer,
+        connectorName,
+      )
+    ) {
+      return activeComposer;
+    }
+    await activeComposer.fill("").catch(() => undefined);
     throw new Error(
-      'ChatGPT did not attach the exact connector "' +
+      'ChatGPT did not become ready to attach the exact connector "' +
         connectorName +
-        '" after accepting the @mention.',
+        '" within 180 seconds.',
     );
   }
 

@@ -91,16 +91,30 @@ ordinary turns.
 
 ### 3. The exact connector is attached
 
-Before the OMP prompt is inserted, the backend:
+Model-idle and connector-ready are separate browser states. ChatGPT may stop
+showing its generation control while Apps/@mention autocomplete is still
+temporarily unavailable. Before the OMP prompt is inserted, the backend uses a
+capability-based readiness gate with a **180 second** global deadline:
 
-1. types the connector mention query
-2. finds exactly one visible row matching the configured connector name
-3. ensures that row is keyboard-highlighted
-4. presses Enter
-5. resolves the possibly replaced composer subtree again
-6. verifies an exact selected-app pill with the configured connector keyword
+1. resolve the current composer and return immediately if the exact connector
+   pill is already attached
+2. type only the short connector mention query
+3. wait up to about 2 seconds for exactly one visible row matching the
+   configured connector name
+4. if unavailable, clear the query, wait about 400 ms, re-resolve the composer,
+   and repeat
+5. when the exact row appears, ensure it is keyboard-highlighted and press Enter
+6. allow up to about 10 seconds for the exact selected-app pill to attach
+7. if selection did not stick, re-probe while the 180 second global budget
+   remains
 
-If this proof fails, the turn fails before prompt submission.
+The full OMP provider prompt is inserted only after the exact connector pill is
+proved. A late-attaching exact pill is checked before any retry clear so it is
+not accidentally removed. If readiness never arrives within the global
+deadline, the turn fails before provider prompt submission.
+
+Tool-free compaction/handoff maintenance does not pass through this connector
+readiness gate.
 
 ### 4. The prompt is inserted
 

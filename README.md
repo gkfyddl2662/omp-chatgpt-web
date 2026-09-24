@@ -175,6 +175,16 @@ reconstruct safely.
 The prompt contract itself is preserved between turns; performance work is
 limited to browser transport and retained-session behavior.
 
+Ordinary tool-enabled turns also treat connector availability as a separate
+readiness state from model-idle. ChatGPT can remove the stop-generating control
+before Apps/@mention autocomplete is ready again. Instead of failing after one
+fixed mention wait, the backend probes the configured connector capability for
+up to **180 seconds**: it types only the short @mention query, waits briefly for
+one exact connector row, clears the query if unavailable, re-resolves the
+composer, and retries. The full OMP provider prompt is not inserted until the
+exact connector pill is attached. Compaction/handoff maintenance is tool-free
+and does not wait on connector readiness.
+
 Ordinary provider prompts use the same guarded submission transport as
 maintenance prompts: Enter is attempted first, then the visible ChatGPT Send
 button is clicked only if no submission evidence appeared and the verified
