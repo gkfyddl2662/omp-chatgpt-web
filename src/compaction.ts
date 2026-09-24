@@ -17,10 +17,12 @@ function textContent(content: unknown): string {
     .join("\n");
 }
 
-export function isOmpCompactionContext(
+export type OmpCompactionKind = "structured" | "handoff";
+
+export function classifyOmpCompactionContext(
   context: Context,
   options?: Pick<SimpleStreamOptions, "toolChoice">,
-): boolean {
+): OmpCompactionKind | undefined {
   const system = (context.systemPrompt ?? []).join("\n");
   const userMessages = context.messages
     .filter(message => message.role === "user")
@@ -31,7 +33,7 @@ export function isOmpCompactionContext(
     system.includes(OMP_SUMMARIZATION_SYSTEM_MARKER) &&
     userText.includes("<conversation>") &&
     userText.includes("</conversation>");
-  if (structuredSummary) return true;
+  if (structuredSummary) return "structured";
 
   const lastUser = userMessages[userMessages.length - 1] ?? "";
   const handoff =
@@ -39,7 +41,14 @@ export function isOmpCompactionContext(
     lastUser.includes("Write a handoff document for another instance of yourself.") &&
     lastUser.includes("The handoff MUST be sufficient for seamless continuation without access to this conversation.") &&
     lastUser.includes("Output ONLY the handoff document.");
-  return handoff;
+  return handoff ? "handoff" : undefined;
+}
+
+export function isOmpCompactionContext(
+  context: Context,
+  options?: Pick<SimpleStreamOptions, "toolChoice">,
+): boolean {
+  return classifyOmpCompactionContext(context, options) !== undefined;
 }
 
 export function compileCompactionPrompt(context: Context): string {
