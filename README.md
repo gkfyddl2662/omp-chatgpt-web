@@ -175,6 +175,15 @@ reconstruct safely.
 The prompt contract itself is preserved between turns; performance work is
 limited to browser transport and retained-session behavior.
 
+Ordinary provider prompts use the same guarded submission transport as
+maintenance prompts: Enter is attempted first, then the visible ChatGPT Send
+button is clicked only if no submission evidence appeared and the verified
+draft is still present. Before that fallback click the exact OMP Local connector
+pill is revalidated. A prompt that is definitely still only a draft is cleared
+without retiring the browser page, and the failure is surfaced to OMP as a
+silent recovery so an active Goal can schedule its normal continuation instead
+of requiring a manual pause/resume cycle.
+
 ### Long-turn browser failure recovery
 
 Ordinary Web turns continuously watch for a new ChatGPT error/retry surface,
