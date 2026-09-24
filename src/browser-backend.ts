@@ -8,7 +8,10 @@ import {
   type Page,
 } from "playwright-core";
 import type { RuntimeConfig } from "./config.js";
-import { assertValidCompactionSummary } from "./compaction.js";
+import {
+  assertValidCompactionSummary,
+  type OmpCompactionKind,
+} from "./compaction.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -47,6 +50,13 @@ export class ChatGptReplayUnsafeTurnError extends Error {
     );
     this.name = "ChatGptReplayUnsafeTurnError";
     this.browserMessage = browserMessage;
+  }
+}
+
+class ChatGptMaintenanceNotSubmittedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChatGptMaintenanceNotSubmittedError";
   }
 }
 
@@ -694,7 +704,11 @@ export class ChatGptBrowserBackend {
 
   async compactSessionWhenIdle(
     sessionKey: string,
-    prompts: { retained: string; fresh: string },
+    prompts: {
+      kind: OmpCompactionKind;
+      retained: string;
+      fresh?: string;
+    },
     config: RuntimeConfig,
     signal?: AbortSignal,
   ): Promise<string> {
@@ -726,12 +740,30 @@ export class ChatGptBrowserBackend {
           );
         } catch (error) {
           if (signal?.aborted) throw error;
-          // The retained page survived the ordinary-turn failure, so prefer it
-          // and keep the compact prompt on that exact thread. If ChatGPT's
-          // failed-turn surface makes the composer unusable, retained
-          // compaction invalidates that page and this maintenance-only request
-          // can safely retry once in a fresh Temporary Chat.
+          if (prompts.kind === "handoff") {
+            // Handoff must stay attached to the retained history. If its
+            // retained submission fails, return the failure to OMP so the
+            // maintenance method order can move on (for example to shake)
+            // instead of replaying an already-overflowing whole history into a
+            // fresh ChatGPT tab.
+            throw error;
+          }
+
+          // Structured context-full maintenance is a self-contained OMP side
+          // request and may safely retry once in a fresh tool-free chat. If
+          // the retained failure was definitely pre-submission, the retained
+          // page was intentionally preserved; retire it before creating the
+          // fresh maintenance page.
+          if (this.hasRetainedConversation(sessionKey)) {
+            await this.invalidateSession(sessionKey);
+          }
         }
+      }
+
+      if (prompts.kind === "handoff" || !prompts.fresh) {
+        throw new Error(
+          "Auto-handoff requires the retained ChatGPT conversation; fresh full-history handoff replay is disabled.",
+        );
       }
 
       return await this.compactFreshSession(
