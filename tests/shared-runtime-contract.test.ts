@@ -47,6 +47,29 @@ test("Web parent routes task and eval subagents back through chatgpt-web/web", (
   assert.match(extensionSource, /model: PROVIDER \+ "\/" \+ MODEL/);
 });
 
+test("Web agents see the remaining root subagent budget before deciding to spawn", () => {
+  assert.match(extensionSource, /pi\.on\("before_agent_start"/);
+  assert.match(extensionSource, /sharedSubagentLimiter\.status\(rootKey, config\.subagentLimit\)/);
+  assert.match(extensionSource, /ChatGPT Web subagent budget for this root OMP session/);
+  assert.match(extensionSource, /"- remaining: " \+ \(status\.unlimited \? "unlimited" : status\.remaining\)/);
+  assert.match(extensionSource, /No additional task\/eval subagent may be spawned/);
+  assert.match(extensionSource, /Do not plan or attempt more than/);
+  assert.match(extensionSource, /systemPrompt: \[/);
+  assert.match(extensionSource, /\.\.\.event\.systemPrompt/);
+});
+
+test("subagent status and spawn notes explicitly report remaining slots", () => {
+  assert.match(
+    extensionSource,
+    /status\.used \+ "\/" \+ status\.limit \+ " used, " \+ status\.remaining \+ " remaining"/,
+  );
+  assert.match(
+    extensionSource,
+    /"unlimited \(used " \+ status\.used \+ ", remaining unlimited\)"/,
+  );
+  assert.match(extensionSource, /No subagent slots remain/);
+});
+
 test("shared MCP and tunnel starts are serialized", () => {
   assert.match(extensionSource, /sharedMcpStarting/);
   assert.match(extensionSource, /sharedTunnelStarting/);
