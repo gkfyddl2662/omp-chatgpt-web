@@ -103,3 +103,44 @@ test("turn completion is delivered to the provider side", async () => {
   const action = await broker.nextAction("session-1");
   assert.deepEqual(action, { type: "complete", token, answer: "done" });
 });
+
+
+test("completed turn tokens remain recognizable but tool-disabled during browser settlement grace", async () => {
+  const broker = new TurnBroker({ completedTokenGraceMs: 5_000 });
+  const first = broker.begin("session-1", tools);
+
+  broker.complete(first.token, "done");
+  const complete = await broker.nextAction("session-1");
+  assert.equal(complete.type, "complete");
+
+  broker.end("session-1");
+
+  const lateInventory = broker.inventory(first.token);
+  assert.deepEqual(lateInventory, {
+    tools: [],
+    total: 0,
+    next_offset: null,
+  });
+
+  await assert.rejects(
+    broker.requestTool(first.token, "goal", { op: "get" }),
+    /already completed/,
+  );
+
+  assert.doesNotThrow(() => broker.complete(first.token, "done again"));
+
+  const second = broker.begin("session-1", tools);
+  assert.notEqual(second.token, first.token);
+  assert.equal(second.reused, false);
+});
+
+test("unfinished turn tokens still expire immediately when ended", () => {
+  const broker = new TurnBroker({ completedTokenGraceMs: 5_000 });
+  const { token } = broker.begin("session-1", tools);
+  broker.end("session-1");
+
+  assert.throws(
+    () => broker.inventory(token),
+    /Unknown or expired OMP Web turn token/,
+  );
+});
