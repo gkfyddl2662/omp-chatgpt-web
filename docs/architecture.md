@@ -275,6 +275,12 @@ own ChatGPT page, while using the same shared MCP/tunnel/browser process-level
 runtime.
 
 The broker multiplexes simultaneous parent/child MCP traffic by turn token.
+Logical completion and browser settlement are intentionally separate: after
+`omp_turn_complete`, OMP may already have the final answer while ChatGPT still
+renders it. The completed token is retained for a 180-second tool-disabled
+grace, and subagent session shutdown waits for browser settlement (also capped
+at 180 seconds) before releasing the child page/request. This keeps a finishing
+child from invalidating its own late MCP traffic or browser surface.
 
 ## Title utility requests
 
