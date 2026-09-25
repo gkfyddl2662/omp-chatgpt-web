@@ -270,9 +270,14 @@ root OMP session**, including nested descendants.
   count. The counter resets when the whole root/subagent Web session family is
   released.
 - Every actual child dispatch consumes one slot, even if OMP/model code reuses
-  the same subagent label or spawn key. Once exhausted, the hook explicitly
-  instructs the model to stop attempting more task/eval child spawns in that
-  root session.
+  the same subagent label or spawn key.
+- Before each Web agent turn, the extension injects the current root-family
+  budget into the model system context, including `used`, `limit`, and
+  `remaining`. For example: `3/4 used, 1 remaining`.
+- When `remaining` is zero, the model is told before tool selection not to
+  attempt another task/eval child spawn and to continue in the current agent.
+  The `before_subagent_spawn` hard-limit check remains the final enforcement
+  boundary.
 
 This is separate from OMP's own `task.maxConcurrency` and
 `task.maxRecursionDepth` controls: those govern parallelism and recursion
