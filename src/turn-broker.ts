@@ -65,6 +65,8 @@ interface TurnState {
   waiters: Array<Deferred<BrokerAction>>;
   pendingTool?: PendingTool;
   closed: boolean;
+  completed: boolean;
+  retireTimer?: ReturnType<typeof setTimeout>;
 }
 
 export interface BeginTurnResult {
@@ -143,13 +145,16 @@ export class TurnBroker {
   readonly #bySession = new Map<string, TurnState>();
   readonly #byToken = new Map<string, TurnState>();
   readonly #toolTimeoutMs: number;
+  readonly #completedTokenGraceMs: number;
   readonly #schemaForTool: ToolSchemaProjector;
 
   constructor(options?: {
     toolTimeoutMs?: number;
+    completedTokenGraceMs?: number;
     schemaForTool?: ToolSchemaProjector;
   }) {
     this.#toolTimeoutMs = options?.toolTimeoutMs ?? 85_000;
+    this.#completedTokenGraceMs = options?.completedTokenGraceMs ?? 180_000;
     this.#schemaForTool =
       options?.schemaForTool ?? defaultToolSchemaProjector;
   }
@@ -168,6 +173,7 @@ export class TurnBroker {
       actions: [],
       waiters: [],
       closed: false,
+      completed: false,
     };
     this.#bySession.set(sessionKey, state);
     this.#byToken.set(token, state);
@@ -194,6 +200,9 @@ export class TurnBroker {
     options?: { query?: string; offset?: number; limit?: number; includeSchema?: boolean },
   ): BrowserToolInventoryPage {
     const state = this.#requireToken(token);
+    if (state.completed) {
+      return { tools: [], total: 0, next_offset: null };
+    }
     const offset = Math.max(0, Math.floor(options?.offset ?? 0));
     const limit = Math.min(50, Math.max(1, Math.floor(options?.limit ?? 20)));
     const includeSchema = options?.includeSchema !== false;
@@ -221,6 +230,11 @@ export class TurnBroker {
     signal?: AbortSignal,
   ): Promise<BrowserToolReceipt> {
     const state = this.#requireToken(token);
+    if (state.completed) {
+      throw new Error(
+        "OMP Web turn is already completed. Do not call more tools; render the final answer.",
+      );
+    }
     if (!state.tools.has(name)) {
       throw new Error("OMP tool is not available in this turn: " + name);
     }
@@ -269,11 +283,13 @@ export class TurnBroker {
 
   complete(token: string, answer: string): void {
     const state = this.#requireToken(token);
+    if (state.completed) return;
     if (state.pendingTool) {
       throw new Error("Cannot complete the Web turn while an OMP tool call is still in flight.");
     }
     const text = answer.trim();
     if (!text) throw new Error("omp_turn_complete requires a non-empty answer.");
+    state.completed = true;
     this.#enqueue(state, { type: "complete", token, answer: text });
   }
 
@@ -338,11 +354,35 @@ export class TurnBroker {
       waiter.reject(new Error("OMP Web turn ended."));
     }
     this.#bySession.delete(sessionKey);
-    this.#byToken.delete(state.token);
+
+    if (!state.completed || this.#completedTokenGraceMs <= 0) {
+      this.#byToken.delete(state.token);
+      return;
+    }
+
+    // ChatGPT may still be rendering the final assistant prose after
+    // omp_turn_complete has already returned the logical answer to OMP. Keep a
+    // completed, tool-disabled token tombstone briefly so late browser MCP
+    // traffic receives an explicit completed-turn response instead of a noisy
+    // "expired token" error. New OMP turns are unaffected because the session
+    // mapping is removed immediately and receive a fresh token.
+    state.retireTimer = setTimeout(() => {
+      if (this.#byToken.get(state.token) === state) {
+        this.#byToken.delete(state.token);
+      }
+    }, this.#completedTokenGraceMs);
+    state.retireTimer.unref?.();
   }
 
   abortAll(reason: unknown = new Error("OMP ChatGPT Web runtime stopped.")): void {
-    for (const state of [...this.#bySession.values()]) {
+    for (const state of new Set([
+      ...this.#bySession.values(),
+      ...this.#byToken.values(),
+    ])) {
+      if (state.retireTimer) {
+        clearTimeout(state.retireTimer);
+        state.retireTimer = undefined;
+      }
       if (state.pendingTool) {
         clearTimeout(state.pendingTool.timer);
         state.pendingTool.result.reject(reason);
@@ -369,7 +409,9 @@ export class TurnBroker {
 
   #requireToken(token: string): TurnState {
     const state = this.#byToken.get(token);
-    if (!state || state.closed) throw new Error("Unknown or expired OMP Web turn token.");
+    if (!state || (state.closed && !state.completed)) {
+      throw new Error("Unknown or expired OMP Web turn token.");
+    }
     return state;
   }
 }
