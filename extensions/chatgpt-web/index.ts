@@ -759,6 +759,7 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
         block: true,
         reason:
           "ChatGPT Web subagent hard limit reached (" + decision.used + "/" + decision.limit + "). " +
+          "Do not attempt another task/eval subagent spawn in this root session; continue the work in the current agent. " +
           "Use /web limit <N> to raise it, /web limit 0 to block all, or /web limit off for unlimited.",
       };
     }
@@ -790,6 +791,18 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     if (bindingReleased) return;
     bindingReleased = true;
+
+    // A subagent can logically finish as soon as omp_turn_complete reaches OMP
+    // while ChatGPT Web is still rendering the same final answer. Do not tear
+    // down its retained tab/request at that logical boundary: wait for browser
+    // physical settlement first so the final MCP response/prose can drain
+    // without expiring its turn token underneath the page.
+    const settlementSignal = AbortSignal.timeout(180_000);
+    await Promise.allSettled(
+      [...ownedConversations].map(key =>
+        browser.waitForTurnIdle(key, settlementSignal)
+      ),
+    );
 
     for (const request of ownedRequests) broker.end(request);
     ownedRequests.clear();

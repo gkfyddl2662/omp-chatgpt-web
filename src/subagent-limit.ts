@@ -15,7 +15,6 @@ export function normalizeWebSubagentLimit(
 
 interface RootBudget {
   used: number;
-  spawnKeys: Set<string>;
   owners: number;
 }
 
@@ -28,7 +27,6 @@ export interface SubagentLimitStatus {
 
 export interface SubagentSpawnDecision extends SubagentLimitStatus {
   allowed: boolean;
-  duplicate: boolean;
 }
 
 export class WebSubagentLimiter {
@@ -37,7 +35,7 @@ export class WebSubagentLimiter {
   #budget(rootKey: string): RootBudget {
     let budget = this.#budgets.get(rootKey);
     if (!budget) {
-      budget = { used: 0, spawnKeys: new Set<string>(), owners: 0 };
+      budget = { used: 0, owners: 0 };
       this.#budgets.set(rootKey, budget);
     }
     return budget;
@@ -54,32 +52,26 @@ export class WebSubagentLimiter {
     if (budget.owners === 0) this.#budgets.delete(rootKey);
   }
 
-  trySpawn(rootKey: string, spawnKey: string | undefined, limit: number): SubagentSpawnDecision {
+  trySpawn(rootKey: string, _spawnKey: string | undefined, limit: number): SubagentSpawnDecision {
     const normalizedLimit = normalizeWebSubagentLimit(limit);
     const budget = this.#budget(rootKey);
 
-    if (spawnKey && budget.spawnKeys.has(spawnKey)) {
-      return {
-        allowed: true,
-        duplicate: true,
-        ...this.#statusFromBudget(budget, normalizedLimit),
-      };
-    }
-
+    // OMP now fires before_subagent_spawn exactly once per actual child
+    // dispatch. A repeated spawnKey therefore represents another real spawn
+    // (for example a model reusing the same task label), not a hook replay.
+    // Count every dispatch so a cumulative hard limit cannot be bypassed by
+    // repeatedly spawning the same named subagent.
     if (normalizedLimit >= 0 && budget.used >= normalizedLimit) {
       return {
         allowed: false,
-        duplicate: false,
         ...this.#statusFromBudget(budget, normalizedLimit),
       };
     }
 
     budget.used += 1;
-    if (spawnKey) budget.spawnKeys.add(spawnKey);
 
     return {
       allowed: true,
-      duplicate: false,
       ...this.#statusFromBudget(budget, normalizedLimit),
     };
   }

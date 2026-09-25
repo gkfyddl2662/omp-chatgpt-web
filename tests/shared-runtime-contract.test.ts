@@ -304,3 +304,27 @@ test("connector readiness never clears a connector that attached late", () => {
   assert.ok(lateExactCheck > lateAttachComment);
   assert.ok(nextClear > lateExactCheck);
 });
+
+
+test("subagent session shutdown drains physical Web settlement before releasing broker and tab state", () => {
+  const start = extensionSource.indexOf('pi.on("session_shutdown"');
+  assert.ok(start >= 0);
+  const end = extensionSource.indexOf("\n  });", start);
+  assert.ok(end > start);
+  const block = extensionSource.slice(start, end);
+
+  const wait = block.indexOf("browser.waitForTurnIdle");
+  const brokerEnd = block.indexOf("broker.end(request)");
+  const release = block.indexOf("releaseSharedConversation(key)");
+  assert.ok(wait >= 0);
+  assert.ok(brokerEnd > wait);
+  assert.ok(release > brokerEnd);
+  assert.match(block, /AbortSignal\.timeout\(180_000\)/);
+});
+
+test("hard-limit rejection tells the model to stop attempting more subagent spawns", () => {
+  assert.match(
+    extensionSource,
+    /Do not attempt another task\/eval subagent spawn in this root session/,
+  );
+});

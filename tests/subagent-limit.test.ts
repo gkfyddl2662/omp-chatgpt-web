@@ -43,17 +43,15 @@ test("zero disables subagent spawning and minus one is unlimited", () => {
   assert.equal(limiter.status("unlimited", -1).remaining, null);
 });
 
-test("replayed spawn keys do not consume the budget twice", () => {
+test("reused spawn keys still count as real child dispatches", () => {
   const limiter = new WebSubagentLimiter();
   limiter.retain("root");
 
   assert.equal(limiter.trySpawn("root", "same", 1).allowed, true);
-  const replay = limiter.trySpawn("root", "same", 1);
-  assert.equal(replay.allowed, true);
-  assert.equal(replay.duplicate, true);
-  assert.equal(replay.used, 1);
-
-  assert.equal(limiter.trySpawn("root", "different", 1).allowed, false);
+  const repeated = limiter.trySpawn("root", "same", 1);
+  assert.equal(repeated.allowed, false);
+  assert.equal(repeated.used, 1);
+  assert.equal(repeated.remaining, 0);
 });
 
 test("budget is released only after the last session in the root family shuts down", () => {
