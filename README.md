@@ -240,8 +240,13 @@ review subagent ----------> Temporary Chat tab C
 ```
 
 The MCP bridge multiplexes concurrent parent/child turns by opaque
-`turn_token`. A child session releases only its own browser conversation and
-turn state when it exits.
+`turn_token`. After `omp_turn_complete`, the logical OMP result is available
+immediately, but a completed token remains as a tool-disabled tombstone for up
+to 180 seconds while ChatGPT finishes rendering the final prose. A child
+session also waits up to 180 seconds for its browser turn to physically settle
+before releasing its own browser conversation and turn state. This prevents a
+subagent teardown from expiring a token or retiring a tab underneath a still-
+rendering ChatGPT response.
 
 ### Subagent hard limit
 
@@ -264,6 +269,10 @@ root OMP session**, including nested descendants.
 - Changing the limit does not erase the root session's already-used spawn
   count. The counter resets when the whole root/subagent Web session family is
   released.
+- Every actual child dispatch consumes one slot, even if OMP/model code reuses
+  the same subagent label or spawn key. Once exhausted, the hook explicitly
+  instructs the model to stop attempting more task/eval child spawns in that
+  root session.
 
 This is separate from OMP's own `task.maxConcurrency` and
 `task.maxRecursionDepth` controls: those govern parallelism and recursion
