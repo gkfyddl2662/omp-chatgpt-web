@@ -52,8 +52,33 @@ function subagentRootKey(ctx: SubagentContext): string {
 
 function formatSubagentLimit(status: SubagentLimitStatus): string {
   return status.unlimited
-    ? "unlimited (used " + status.used + ")"
-    : status.used + "/" + status.limit + " used";
+    ? "unlimited (used " + status.used + ", remaining unlimited)"
+    : status.used + "/" + status.limit + " used, " + status.remaining + " remaining";
+}
+
+function subagentBudgetPrompt(status: SubagentLimitStatus): string {
+  const lines = [
+    "ChatGPT Web subagent budget for this root OMP session:",
+    "- used: " + status.used,
+    "- limit: " + (status.unlimited ? "unlimited" : status.limit),
+    "- remaining: " + (status.unlimited ? "unlimited" : status.remaining),
+  ];
+
+  if (!status.unlimited) {
+    if (status.remaining === 0) {
+      lines.push(
+        "No additional task/eval subagent may be spawned. Do not call task/eval to create another child; continue in the current agent.",
+      );
+    } else {
+      lines.push(
+        "Do not plan or attempt more than " + status.remaining +
+          " additional task/eval subagent spawn" + (status.remaining === 1 ? "" : "s") +
+          " in this root session.",
+      );
+    }
+  }
+
+  return lines.join("\n");
 }
 
 let sharedMcp: McpServerHandle | undefined;
@@ -748,6 +773,20 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.on("before_agent_start", (event, ctx) => {
+    const current = ctx.models.current() ?? ctx.model;
+    if (current?.provider !== PROVIDER || current.id !== MODEL) return;
+
+    const rootKey = bindingRootKey ?? subagentRootKey(ctx);
+    const status = sharedSubagentLimiter.status(rootKey, config.subagentLimit);
+    return {
+      systemPrompt: [
+        ...event.systemPrompt,
+        subagentBudgetPrompt(status),
+      ],
+    };
+  });
+
   pi.on("before_subagent_spawn", (event, ctx) => {
     const current = ctx.models.current() ?? ctx.model;
     if (current?.provider !== PROVIDER || current.id !== MODEL) return;
@@ -758,8 +797,8 @@ export default function chatGptWebExtension(pi: ExtensionAPI) {
       return {
         block: true,
         reason:
-          "ChatGPT Web subagent hard limit reached (" + decision.used + "/" + decision.limit + "). " +
-          "Do not attempt another task/eval subagent spawn in this root session; continue the work in the current agent. " +
+          "ChatGPT Web subagent hard limit reached (" + formatSubagentLimit(decision) + "). " +
+          "No subagent slots remain. Do not attempt another task/eval subagent spawn in this root session; continue the work in the current agent. " +
           "Use /web limit <N> to raise it, /web limit 0 to block all, or /web limit off for unlimited.",
       };
     }
